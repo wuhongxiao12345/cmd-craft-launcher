@@ -237,3 +237,6 @@ A：直接把 `ccl.bat` 放到 PCL2 根目录即可，会读取 `PCL.ini` 并识
 ## 许可
 
 见 [LICENSE](LICENSE)。
+
+
+**作者吐槽**：全文只有这句话是人类写的，deepseek太神奇了
