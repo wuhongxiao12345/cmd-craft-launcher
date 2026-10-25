@@ -2198,7 +2198,7 @@ function Show-MainMenu {
     Write-Host '  2. 版本管理'
     Write-Host '  3. Java 管理'
     Write-Host '  4. Mod 管理 (搜索下载/本地管理)'
-    Write-Host '  5. 安装 Mod 加载器 (Fabric/Forge)'
+    Write-Host '  5. 安装 Mod 加载器 (Fabric/Forge/NeoForge)'
     Write-Host '  6. 整合包导入'
     Write-Host '  7. 设置'
     Write-Host '  8. 后台任务'
