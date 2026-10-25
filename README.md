@@ -4,7 +4,7 @@
 
 > **版权提示**：本项目是启动器工具，不包含、不分发任何 Minecraft 游戏文件、材质、音效或商标资源；所有游戏文件均由使用者通过官方渠道获取。Minecraft 是 Mojang Studios / Microsoft 的商标，本项目与其无隶属、赞助或背书关系。使用者须自行确保拥有正版授权，并遵守 [Minecraft EULA](https://www.minecraft.net/eula) 与[商业使用指南](https://www.minecraft.net/usage-guidelines)。
 
-**当前版本：v1.0.1**
+**当前版本：v1.0.2**
 
 ---
 
@@ -33,10 +33,13 @@
 - 导入到 `.minecraft/instances/<包名>/`，自动切换游戏目录并按依赖询问安装加载器
 
 ### Mod 管理
-- **Modrinth 搜索下载**：按当前游戏版本 + 加载器过滤
-- **中文关键词支持**：内置 67 组中英词典（钠→sodium、小地图→xaeros minimap、合成表→JEI、匠魂→Tinkers' Construct、光影→iris、宝可梦→Cobblemon…），中文输入时**先搜英文命中本体，再搜中文原文**，多词短语自动补搜首词
+- **搜索下载**：按当前游戏版本 + 加载器过滤，自动识别加载器版本（如 `neoforge-21.1.264`）对应的真实 MC 版本
+- **中文关键词支持**：接入[麦块开放 API](https://api.minekuai.cn)（内置中文翻译的 Mod 库，含 CurseForge / Modrinth 双源），直接搜中文即可命中本体（"机械动力" → Create、"合成表" → JEI），同时显示中文标题与原名
+- **降级链**：麦块 API 无结果或不可用时自动回退到 Modrinth 原生搜索，中文效果较差但英文完全可用
+- **加载器校验**：安装前二次确认返回文件的 `loaders` 字段包含当前加载器，不匹配时明确拒绝并列出可用加载器
 - **模糊搜索**：输入部分名称即可（`sodi` → Sodium）
 - **本地 Mod 管理**：`f关键词` 模糊筛选、`e序号` 启用、`d序号` 禁用/删除
+- **原版拦截**：原版（vanilla）下进入 Mod 管理会明确提示先安装加载器
 
 ### Java 管理
 - 自动检测（配置指定 → `ccl/java` 下各版本 → 系统 PATH），**按版本需求挑选**：优先满足 `javaVersion.majorVersion`，而非死守配置
@@ -182,6 +185,12 @@ A：v1.0.1 已改用 `-LiteralPath`，不会再把方括号当通配符。
 **Q：想用已有 PCL2 的 `.minecraft`？**
 A：直接把 `ccl.bat` 放到 PCL2 根目录即可，会读取 `PCL.ini` 并识别既有版本/隔离结构。
 
+**Q：中文搜 Mod 搜不到结果？**
+A：中文搜索依赖麦块开放 API（`api.minekuai.cn`）。若该服务不可达，程序会自动降级到 Modrinth 原生搜索，此时中文关键词效果较差，建议改用英文名（如 `sodium`、`jei`）。
+
+**Q：搜索结果显示的 Mod 装不上或版本不对？**
+A：搜索时会按当前 MC 版本 + 加载器过滤，安装前还会二次校验返回文件的 `loaders` 字段。若提示"该文件不适用于 xxx"，说明该 Mod 确实没有当前加载器的版本（例如 Sodium 只有 Fabric/Quilt 版，Forge 上应找 Embeddium）。
+
 ---
 
 ## 数据来源
@@ -191,6 +200,7 @@ A：直接把 `ccl.bat` 放到 PCL2 根目录即可，会读取 `PCL.ini` 并识
 - Forge：`files.minecraftforge.net`
 - NeoForge：`maven.neoforged.net`
 - Mod：`api.modrinth.com`
+- Mod（中文搜索）：[麦块开放 API](https://api.minekuai.cn)（`api.minekuai.cn`）
 - JDK：清华 TUNA / Adoptium
 - 镜像：BMCBL（`bmclapi2.bangbang93.com`）
 

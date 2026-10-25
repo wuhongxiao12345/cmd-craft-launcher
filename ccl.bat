@@ -207,7 +207,7 @@ function Get-Json {
   $tryUrls = Get-UrlWithMirror $url
   foreach ($u in $tryUrls) {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
-      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 30 -A 'ccl-launcher/1.0.1' -o $tmp $u
+      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 30 -A 'ccl-launcher/1.0.2' -o $tmp $u
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
         $txt = [IO.File]::ReadAllText($tmp)
         if ($txt.Trim()) { $ok = $true; break }
@@ -260,7 +260,7 @@ function Download-File {
   if (-not $showProgress) {
     $ok = $false
     foreach ($u in $allUrls) {
-      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0.1' -o $tmp $u
+      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0.2' -o $tmp $u
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
         if ($sha1) {
           $got = (Get-FileHash -LiteralPath $tmp -Algorithm SHA1).Hash
@@ -276,11 +276,11 @@ function Download-File {
     foreach ($u in $allUrls) {
       $totalSize = [int64]0
       try {
-        $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 8 -A 'ccl-launcher/1.0.1' $u 2>$null
+        $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 8 -A 'ccl-launcher/1.0.2' $u 2>$null
         foreach ($ln in $hdr) { if ($ln -match '(?i)content-length:\s*(\d+)') { $totalSize = [int64]$Matches[1]; break } }
       } catch {}
       # 尝试下载（小超时探测）
-      & curl.exe -s -L --ssl-no-revoke -m 20 -A 'ccl-launcher/1.0.1' -o $tmp $u
+      & curl.exe -s -L --ssl-no-revoke -m 20 -A 'ccl-launcher/1.0.2' -o $tmp $u
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
         $useUrl = $u; Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; break
       }
@@ -289,10 +289,10 @@ function Download-File {
     if (-not $useUrl) { throw ('下载失败(所有镜像不可用): ' + $url) }
     $totalSize = [int64]0
     try {
-      $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 30 -A 'ccl-launcher/1.0.1' $useUrl 2>$null
+      $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 30 -A 'ccl-launcher/1.0.2' $useUrl 2>$null
       foreach ($ln in $hdr) { if ($ln -match '(?i)content-length:\s*(\d+)') { $totalSize = [int64]$Matches[1]; break } }
     } catch {}
-    $proc = Start-Process -FilePath 'curl.exe' -ArgumentList @('-s','-L','--ssl-no-revoke','--retry','2','-m','900','-A','ccl-launcher/1.0.1','-o',$tmp,$useUrl) -PassThru -WindowStyle Hidden
+    $proc = Start-Process -FilePath 'curl.exe' -ArgumentList @('-s','-L','--ssl-no-revoke','--retry','2','-m','900','-A','ccl-launcher/1.0.2','-o',$tmp,$useUrl) -PassThru -WindowStyle Hidden
     $lastT = [DateTime]::Now; $lastB = [int64]0
     while (-not $proc.HasExited) {
       $cur = [int64]0
@@ -365,7 +365,7 @@ try {
   $urls = @($url) + @($altUrls)
   $downloaded = $false
   foreach ($u in $urls) {
-    & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0.1' -o $tmp $u
+    & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0.2' -o $tmp $u
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) { $downloaded = $true; break }
     Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue
   }
@@ -1077,7 +1077,7 @@ function Start-Minecraft($id) {
     classpath = $classpath
     natives_directory = $nativesDir
     launcher_name = 'ccl'
-    launcher_version = '1.0.1'
+    launcher_version = '1.0.2'
     auth_player_name = $name
     version_name = $id
     game_directory = $gameDir
@@ -1529,56 +1529,6 @@ function Get-McVersion($cfg) {
   return $null
 }
 
-# 常用 Mod 中文→英文词典（键为中文，值为英文检索词，可多个用 | 分隔）
-function Get-ModDict {
-  return @{
-    '钠'='sodium'; '锂'='lithium'; '磷'='phosphor'; '铷'='rubidium'; '镁'='magnesium'
-    '小地图'='xaeros minimap|xaero'; '地图'='xaero map|journeymap|xaero'; '世界地图'='xaeros world map|xaero'
-    '合成表'='jei|just enough items'; '物品管理器'='jei|emi|rei'; '配方'='jei|rei|emi'
-    '辅助'='jei|wthit|jade'; '信息'='jade|wthit'; '检测'='wthit|jade'
-    '创造'='create'; '机械动力'='create'; '蒸汽'='create steam'
-    '工业'='industrialcraft|mekanism|modern industrialization'; '工业时代'='ic2'
-    '应用能源'='ae2|applied energistics'; '存储'='ae2|refined storage|storage'
-    '抽屉'='storage drawers'; '箱子'='iron chests|storage'
-    '建筑'='buildcraft|construction'; '建筑棒'='building gadgets'
-    '神秘'='thaumcraft|botania'; '魔法'='botania|ars nouveau'; '植物'='botania'
-    '匠魂'='tinkers construct'; '拔刀剑'='slashblade'; '武器'='epic fight|slashblade'
-    '光影'='iris|optifine|shader'; '着色器'='iris shader'; '优化'='sodium|lithium|optifine'
-    '农业'='farmers delight|agriculture'; '食物'='farmers delight|food'
-    '钓鱼'='fishing'; '冒险'='adventure|twilight forest'; '暮色'='twilight forest'
-    '下界'='nether'; '末地'='end'; '维度'='dimension'
-    '精灵'='cobblemon|pokemon'; '宝可梦'='cobblemon'; '宠物'='pet'
-    '家具'='furniture|decocraft'; '装饰'='decoration|furniture'
-    '枪械'='gun|vic modern warfare'; '载具'='vehicle|immersive vehicles'
-    '铁路'='railway|create steam'; '火车'='create steam'
-    '能量'='energy|powah'; '电力'='energy|powah|mekanism'
-    '基因'='genetics|forestry'; '林业'='forestry'; '蜜蜂'='forestry|bee'
-    '附魔'='enchantment'; '背包'='backpack|travelers backpack'; '旅行'='travelers backpack'
-    '传送'='waystone|teleport'; '墓碑'='gravestone|corpse'
-    '任务'='ftb quests|quests'; '成就'='advancement'
-    '汉化'='translation|chinese'; '中文'='chinese|translation'
-    '拔刀'='slashblade'; '剑'='slashblade|epic fight'
-  }
-}
-
-# 中文关键词 → 英文检索词列表；非中文或未命中词典时返回空
-function Translate-ModQuery($q) {
-  $dict = Get-ModDict
-  $results = New-Object System.Collections.ArrayList
-  # 先精确匹配整词
-  if ($dict.ContainsKey($q)) {
-    foreach ($w in ($dict[$q] -split '\|')) { if ($w) { [void]$results.Add($w.Trim()) } }
-  }
-  # 再匹配包含关系（关键词包含词典键，或词典键包含关键词）
-  foreach ($k in $dict.Keys) {
-    if ($k -eq $q) { continue }
-    if ($q.Contains($k) -or $k.Contains($q)) {
-      foreach ($w in ($dict[$k] -split '\|')) { if ($w) { [void]$results.Add($w.Trim()) } }
-    }
-  }
-  return @($results | Select-Object -Unique)
-}
-
 function Test-HasChinese($s) {
   return ($s -match '[一-鿿]')
 }
@@ -1589,56 +1539,65 @@ function Search-Modrinth($q, $mcVer, $loader, $limit = 20) {
   return (Get-Json $url ('mod_search_' + [guid]::NewGuid().ToString('N') + '.json') 0)
 }
 
-# 综合搜索：中文时中英双语搜索并合并去重（英文命中优先）
+# 麦块开放 API：内置中文翻译的 Mod 库，返回 Modrinth slug 便于直接安装
+# 文档：https://api.minekuai.cn  限流 600 次/分钟，无需 Key
+function Search-ModMinekuai($q, $mcVer, $loader, $limit = 20) {
+  $url = 'https://api.minekuai.cn/panel/public/mc-mods?q=' + [uri]::EscapeDataString($q)
+  $url += '&limit=' + $limit + '&status=translated'
+  if ($loader) { $url += '&loader%5B%5D=' + [uri]::EscapeDataString($loader) }
+  if ($mcVer) { $url += '&game_version%5B%5D=' + [uri]::EscapeDataString($mcVer) }
+
+  $resp = Get-Json $url $null 0
+  $hits = New-Object System.Collections.ArrayList
+  foreach ($it in @($resp.items)) {
+    if (-not $it.slug) { continue }
+    $zh = $it.title_zh
+    if ($zh -and $zh.Trim() -eq '') { $zh = $null }
+    $desc = $it.description_zh
+    if (-not $desc -or $desc.Trim() -eq '') { $desc = $it.description_en }
+    [void]$hits.Add([PSCustomObject]@{
+      slug = $it.slug
+      title = $it.title
+      title_zh = $zh
+      description = $desc
+      downloads = $it.downloads
+      loaders = @($it.loaders)
+      game_versions = @($it.game_versions)
+    })
+  }
+  return [PSCustomObject]@{ hits = @($hits); source = 'minekuai'; total = $resp.total }
+}
+
+# 综合搜索：优先麦块 API（内置中文翻译），失败或空结果时降级到 Modrinth 原生搜索
 function Search-ModCombined($q, $mcVer, $loader, $limit = 20) {
-  $merged = New-Object System.Collections.ArrayList
-  $seen = @{}
-  $added = 0
+  # 1) 麦块 API —— 支持中英文关键词，返回带中文标题的结果
+  try {
+    $r1 = Search-ModMinekuai $q $mcVer $loader $limit
+    if ($r1.hits.Count -gt 0) { return $r1 }
+    Write-Host '  麦块 API 无结果，改用 Modrinth 搜索...' -ForegroundColor DarkGray
+  } catch {
+    Write-Host ('  麦块 API 不可用（' + $_.Exception.Message + '），改用 Modrinth 搜索...') -ForegroundColor DarkGray
+  }
 
-  $appendHits = {
-    param($hits)
-    foreach ($h in $hits) {
-      $id = $h.project_id
-      if (-not $id) { $id = $h.slug }
-      if (-not $seen.ContainsKey($id)) {
-        $seen[$id] = $true
-        [void]$merged.Add($h)
-        $script:__added++
-      }
+  # 2) 降级：Modrinth 原生搜索（中文关键词效果较差）
+  $hits = New-Object System.Collections.ArrayList
+  try {
+    $r2 = Search-Modrinth $q $mcVer $loader $limit
+    foreach ($h in @($r2.hits)) {
+      [void]$hits.Add([PSCustomObject]@{
+        slug = $h.slug
+        title = $h.title
+        title_zh = $null
+        description = $h.description
+        downloads = $h.downloads
+        loaders = @($h.loaders)
+        game_versions = @($h.versions)
+      })
     }
+  } catch {
+    throw
   }
-
-  $translated = @()
-  if (Test-HasChinese $q) {
-    $translated = Translate-ModQuery $q
-  }
-
-  # 1) 英文（翻译后）优先；多词短语先整串搜，再补搜首词
-  foreach ($t in $translated) {
-    if ($merged.Count -ge $limit) { break }
-    $terms = @($t)
-    if ($t -match '\s') { $terms += ($t -split '\s+')[0] }
-    foreach ($term in ($terms | Select-Object -Unique)) {
-      if ($merged.Count -ge $limit) { break }
-      try { $r = Search-Modrinth $term $mcVer $loader $limit } catch { continue }
-      if ($r.hits) { foreach ($h in $r.hits) {
-        $id = $h.project_id; if (-not $id) { $id = $h.slug }
-        if (-not $seen.ContainsKey($id)) { $seen[$id] = $true; [void]$merged.Add($h) }
-      } }
-    }
-  }
-
-  # 2) 中文原文
-  if ($merged.Count -lt $limit) {
-    try { $r2 = Search-Modrinth $q $mcVer $loader $limit } catch {}
-    if ($r2 -and $r2.hits) { foreach ($h in $r2.hits) {
-      $id = $h.project_id; if (-not $id) { $id = $h.slug }
-      if (-not $seen.ContainsKey($id)) { $seen[$id] = $true; [void]$merged.Add($h) }
-    } }
-  }
-
-  $out = @($merged | Select-Object -First $limit)
-  return [PSCustomObject]@{ hits = $out; translated = $translated }
+  return [PSCustomObject]@{ hits = @($hits); source = 'modrinth' }
 }
 
 function Show-ModSearch {
@@ -1663,7 +1622,7 @@ function Show-ModSearch {
       Write-Host '=== Mod 搜索 (Modrinth) ===' -ForegroundColor Cyan
       Write-Host ('  当前版本: ' + $cfg.SelectedVersion)
       Write-Host ('  搜索条件: MC ' + $mcVer + ' / 加载器 ' + $loader) -ForegroundColor Green
-      Write-Host '  支持模糊搜索与中文关键词（如 "钠" 搜 Sodium、"合成表" 搜 JEI）'
+      Write-Host '  支持中英文关键词（如 "机械动力"、"合成表"、"sodium"）'
       $q = Read-Host '  搜索关键词 (留空返回)'
       if ([string]::IsNullOrWhiteSpace($q)) { return }
       try { $r = Search-ModCombined $q $mcVer $loader 20 }
@@ -1675,15 +1634,20 @@ function Show-ModSearch {
     }
     Clear-Host
     Write-Host ('=== 搜索结果: "' + $q + '"  (共 ' + $r.hits.Count + ' 条) ===') -ForegroundColor Cyan
-    if ($r.translated -and $r.translated.Count -gt 0) {
-      Write-Host ('  已智能匹配英文关键词: ' + ($r.translated -join ', ')) -ForegroundColor DarkGray
+    if ($r.source) {
+      $srcTxt = if ($r.source -eq 'minekuai') { '麦块（中文）' } else { 'Modrinth' }
+      Write-Host ('  数据源: ' + $srcTxt) -ForegroundColor DarkGray
     }
     for ($i = 0; $i -lt $r.hits.Count; $i++) {
       $hh = $r.hits[$i]
       $dl = 0; if ($hh.downloads) { $dl = $hh.downloads }
-      Write-Host ('  ' + ($i + 1) + '. ' + $hh.title + '  [' + $hh.slug + ']  下载:' + $dl) -ForegroundColor White
-      $desc = $hh.description; if ($desc.Length -gt 74) { $desc = $desc.Substring(0,74) + '...' }
-      Write-Host ('     ' + $desc) -ForegroundColor DarkGray
+      $showTitle = if ($hh.title_zh) { $hh.title_zh } else { $hh.title }
+      Write-Host ('  ' + ($i + 1) + '. ' + $showTitle + '  [' + $hh.slug + ']  下载:' + $dl) -ForegroundColor White
+      if ($hh.title_zh -and $hh.title -and $hh.title_zh -ne $hh.title) {
+        Write-Host ('     ' + $hh.title) -ForegroundColor DarkGray
+      }
+      $desc = $hh.description; if ($desc -and $desc.Length -gt 74) { $desc = $desc.Substring(0,74) + '...' }
+      if ($desc) { Write-Host ('     ' + $desc) -ForegroundColor DarkGray }
     }
     Write-Host ''
     Write-Host '  序号=下载安装   f关键词=重新搜索   0=返回'
