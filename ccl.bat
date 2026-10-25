@@ -1644,6 +1644,10 @@ function Search-ModCombined($q, $mcVer, $loader, $limit = 20) {
 function Show-ModSearch {
   $cfg = Get-Config
   if (-not $cfg.SelectedVersion) { Write-Host '  请先在版本管理中选择一个版本' -ForegroundColor Yellow; Pause-Any; return }
+  if (-not $cfg.SelectedLoader -or $cfg.SelectedLoader -eq 'vanilla') {
+    Write-Host '  当前是原版，无法搜索 Mod。请先安装并切换到 Fabric / Forge / NeoForge 版本。' -ForegroundColor Yellow
+    Pause-Any; return
+  }
   $loader = Get-LoaderName $cfg
   $mcVer = Get-McVersion $cfg
   if (-not $mcVer) {
@@ -1696,6 +1700,10 @@ function Show-ModSearch {
 }
 
 function Install-ModFromProject($slug, $cfg) {
+  if (-not $cfg.SelectedLoader -or $cfg.SelectedLoader -eq 'vanilla') {
+    Write-Host '  原版无法安装 Mod，请先安装加载器并切换到对应版本。' -ForegroundColor Yellow
+    return
+  }
   $loader = Get-LoaderName $cfg
   $mcVer = Get-McVersion $cfg
   if (-not $mcVer) { Write-Host ('  无法确定 Minecraft 版本（当前: ' + $cfg.SelectedVersion + '）') -ForegroundColor Red; return }
@@ -1959,6 +1967,18 @@ function Show-LoaderMenu {
 }
 
 function Show-ModMenu {
+  # 原版不支持 Mod，进入前统一拦截
+  $pre = Get-Config
+  if (-not $pre.SelectedLoader -or $pre.SelectedLoader -eq 'vanilla') {
+    Clear-Host
+    Write-Host '=== Mod 管理 ===' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  当前是原版（vanilla），无法加载 Mod。' -ForegroundColor Yellow
+    Write-Host '  请先在「5. 安装 Mod 加载器」安装 Fabric / Forge / NeoForge，' -ForegroundColor Yellow
+    Write-Host '  然后在「2. 版本管理」中切换到对应加载器版本。' -ForegroundColor Yellow
+    Pause-Any
+    return
+  }
   while ($true) {
     Clear-Host
     Write-Host '=== Mod 管理 ===' -ForegroundColor Cyan
