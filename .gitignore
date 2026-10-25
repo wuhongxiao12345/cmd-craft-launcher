@@ -1,0 +1,9 @@
+.minecraft/
+ccl/
+*.log
+*.bak
+*.bak_*
+*.corrupt
+*.tmp
+*.jar
+forge-installer.jar.log

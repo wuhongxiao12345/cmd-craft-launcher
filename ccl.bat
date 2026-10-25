@@ -207,7 +207,7 @@ function Get-Json {
   $tryUrls = Get-UrlWithMirror $url
   foreach ($u in $tryUrls) {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
-      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 30 -A 'ccl-launcher/1.0' -o $tmp $u
+      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 30 -A 'ccl-launcher/1.0.1' -o $tmp $u
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
         $txt = [IO.File]::ReadAllText($tmp)
         if ($txt.Trim()) { $ok = $true; break }
@@ -260,7 +260,7 @@ function Download-File {
   if (-not $showProgress) {
     $ok = $false
     foreach ($u in $allUrls) {
-      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0' -o $tmp $u
+      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0.1' -o $tmp $u
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
         if ($sha1) {
           $got = (Get-FileHash -LiteralPath $tmp -Algorithm SHA1).Hash
@@ -276,11 +276,11 @@ function Download-File {
     foreach ($u in $allUrls) {
       $totalSize = [int64]0
       try {
-        $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 8 -A 'ccl-launcher/1.0' $u 2>$null
+        $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 8 -A 'ccl-launcher/1.0.1' $u 2>$null
         foreach ($ln in $hdr) { if ($ln -match '(?i)content-length:\s*(\d+)') { $totalSize = [int64]$Matches[1]; break } }
       } catch {}
       # 尝试下载（小超时探测）
-      & curl.exe -s -L --ssl-no-revoke -m 20 -A 'ccl-launcher/1.0' -o $tmp $u
+      & curl.exe -s -L --ssl-no-revoke -m 20 -A 'ccl-launcher/1.0.1' -o $tmp $u
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
         $useUrl = $u; Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; break
       }
@@ -289,10 +289,10 @@ function Download-File {
     if (-not $useUrl) { throw ('下载失败(所有镜像不可用): ' + $url) }
     $totalSize = [int64]0
     try {
-      $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 30 -A 'ccl-launcher/1.0' $useUrl 2>$null
+      $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 30 -A 'ccl-launcher/1.0.1' $useUrl 2>$null
       foreach ($ln in $hdr) { if ($ln -match '(?i)content-length:\s*(\d+)') { $totalSize = [int64]$Matches[1]; break } }
     } catch {}
-    $proc = Start-Process -FilePath 'curl.exe' -ArgumentList @('-s','-L','--ssl-no-revoke','--retry','2','-m','900','-A','ccl-launcher/1.0','-o',$tmp,$useUrl) -PassThru -WindowStyle Hidden
+    $proc = Start-Process -FilePath 'curl.exe' -ArgumentList @('-s','-L','--ssl-no-revoke','--retry','2','-m','900','-A','ccl-launcher/1.0.1','-o',$tmp,$useUrl) -PassThru -WindowStyle Hidden
     $lastT = [DateTime]::Now; $lastB = [int64]0
     while (-not $proc.HasExited) {
       $cur = [int64]0
@@ -365,7 +365,7 @@ try {
   $urls = @($url) + @($altUrls)
   $downloaded = $false
   foreach ($u in $urls) {
-    & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0' -o $tmp $u
+    & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0.1' -o $tmp $u
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) { $downloaded = $true; break }
     Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue
   }
@@ -1016,7 +1016,9 @@ function Start-Minecraft($id) {
 
   $libRoot = Join-Path $script:McDir 'libraries'
   $cpParts = New-Object System.Collections.ArrayList
-  [void]$cpParts.Add($clientJar)
+  # BootstrapLauncher（NeoForge/Forge 1.17+）自行管理 minecraft 模块，不能再把原版 jar 加入 classpath
+  $isBootstrap = ($res.mainClass -eq 'cpw.mods.bootstraplauncher.BootstrapLauncher')
+  if (-not $isBootstrap) { [void]$cpParts.Add($clientJar) }
   $missingItems = New-Object System.Collections.ArrayList
   $missingLibs = New-Object System.Collections.ArrayList
   foreach ($lib in $res.libraries) {
@@ -1044,7 +1046,7 @@ function Start-Minecraft($id) {
     }
     # 重建 classpath
     $cpParts = New-Object System.Collections.ArrayList
-    [void]$cpParts.Add($clientJar)
+    if (-not $isBootstrap) { [void]$cpParts.Add($clientJar) }
     $stillMissing = 0
     foreach ($lib in $res.libraries) {
       if (-not (Test-Rules $lib.rules)) { continue }
@@ -1075,7 +1077,7 @@ function Start-Minecraft($id) {
     classpath = $classpath
     natives_directory = $nativesDir
     launcher_name = 'ccl'
-    launcher_version = '1.0'
+    launcher_version = '1.0.1'
     auth_player_name = $name
     version_name = $id
     game_directory = $gameDir
@@ -1734,6 +1736,54 @@ function Install-Forge {
   Pause-Any
 }
 
+function Prefetch-NeoForgeLibs($installerJar) {
+  if (-not (Test-Path -LiteralPath $installerJar)) { return }
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $z = [IO.Compression.ZipFile]::OpenRead($installerJar)
+  try {
+    $e = $z.Entries | Where-Object { $_.FullName -eq 'install_profile.json' } | Select-Object -First 1
+    if (-not $e) { return }
+    $sr = New-Object IO.StreamReader($e.Open())
+    $txt = $sr.ReadToEnd(); $sr.Close()
+    $j = $txt | ConvertFrom-Json
+  } finally { $z.Dispose() }
+  $libRoot = Join-Path $script:McDir 'libraries'
+  $items = New-Object System.Collections.ArrayList
+  $host_maven = 'https://bmclapi2.bangbang93.com/maven/'
+  foreach ($lib in @($j.libraries)) {
+    if (-not $lib.name) { continue }
+    # 优先使用官方给出的 artifact 路径（可正确处理 @zip 等扩展名）
+    $rel = $null
+    if ($lib.downloads -and $lib.downloads.artifact -and $lib.downloads.artifact.path) {
+      $rel = $lib.downloads.artifact.path
+    } else {
+      $namePart = $lib.name
+      $ext = 'jar'
+      $at = $namePart.IndexOf('@')
+      if ($at -ge 0) { $ext = $namePart.Substring($at + 1); $namePart = $namePart.Substring(0, $at) }
+      $p = $namePart -split ':'
+      if ($p.Count -lt 3) { continue }
+      $g = $p[0] -replace '[.]', '/'; $a = $p[1]; $v = $p[2]
+      $cls = if ($p.Count -ge 4) { '-' + $p[3] } else { '' }
+      $rel = $g + '/' + $a + '/' + $v + '/' + $a + '-' + $v + $cls + '.' + $ext
+    }
+    $dest = Join-Path $libRoot ($rel -replace '/', $script:Sep)
+    if (Test-Path -LiteralPath $dest) { continue }
+    # 仅预取来自 neoforged/cpw/forge maven 的库；Mojang 库走原有逻辑
+    $useMirror = $false
+    if ($lib.downloads -and $lib.downloads.artifact -and $lib.downloads.artifact.url) {
+      $u = $lib.downloads.artifact.url
+      if ($u -match 'maven\.(neoforged|minecraftforge)\.net' -or $u -match 'files\.minecraftforge\.net') { $useMirror = $true }
+    } else { $useMirror = $true }
+    if (-not $useMirror) { continue }
+    [void]$items.Add(@{ Url = ($host_maven + $rel); Dest = $dest; Sha1 = $null })
+  }
+  if ($items.Count -gt 0) {
+    Write-Host ('  预置 NeoForge 依赖 (' + $items.Count + '，经镜像) ...') -ForegroundColor DarkGray
+    [void](Download-Pool $items (Get-DlThreads) 'NeoForge依赖')
+  }
+}
+
 function Install-NeoForge {
   $cfg = Get-Config
   if (-not $cfg.SelectedVersion) { Write-Host '  请先选择一个 Minecraft 版本' -ForegroundColor Yellow; Pause-Any; return }
@@ -1742,7 +1792,8 @@ function Install-NeoForge {
   $mc = $ver
   $neoVer = ''
   if ($ver -match '^neoforge-(.+)$') { $neoVer = $Matches[1]; $mc = $cfg.MinecraftVersion }
-  if (-not $mc -or $mc -notmatch '^d+.d+(.d+)?$') {
+  if (-not $mc -or $mc -notmatch '^\d+\.\d+(\.\d+)?$') {
+    if ($script:NonInteractive) { Write-Host ('  无法从版本 id 推断 MC 版本: ' + $ver) -ForegroundColor Red; Pause-Any; return }
     $mc = Read-Host '  请输入对应的 Minecraft 版本（如 1.21.1）'
   }
   if (-not $neoVer -and $cfg.SelectedLoader -eq 'neoforge' -and $cfg.SelectedLoaderVersion) { $neoVer = $cfg.SelectedLoaderVersion }
@@ -1771,7 +1822,11 @@ function Install-NeoForge {
       }
     }
   }
-  if (-not $neoVer) { Write-Host '  无法确定 NeoForge 版本，请手动输入' -ForegroundColor Yellow; $neoVer = Read-Host '  NeoForge 版本 (如 21.1.262)' }
+  if (-not $neoVer) {
+    if ($script:NonInteractive) { Write-Host '  无法自动确定 NeoForge 版本（网络不可达）' -ForegroundColor Red; Pause-Any; return }
+    Write-Host '  无法确定 NeoForge 版本，请手动输入' -ForegroundColor Yellow
+    $neoVer = Read-Host '  NeoForge 版本 (如 21.1.262)'
+  }
   if (-not $neoVer) { Pause-Any; return }
   $instUrl = 'https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/' + $neoVer + '/neoforge-' + $neoVer + '-installer.jar'
   $jar = Join-Path $script:CacheDir 'neoforge-installer.jar'
@@ -1784,6 +1839,8 @@ function Install-NeoForge {
   $java = Find-JavaFor 21
   if (-not $java) { Write-Host '  安装 NeoForge 需要 Java 21' -ForegroundColor Yellow; Install-Java 21; $java = Find-JavaFor 21 }
   if (-not $java) { Write-Host '  Java 不可用' -ForegroundColor Red; Pause-Any; return }
+  # 预置依赖库（经镜像），避免安装器逐个访问不可达源
+  try { Prefetch-NeoForgeLibs $jar } catch { Write-Host ('  预置依赖失败: ' + $_.Exception.Message) -ForegroundColor DarkGray }
   Write-Host '  正在安装 NeoForge (可能需要几分钟)...' -ForegroundColor DarkGray
   & $java -jar $jar --installClient $script:McDir
   if ($LASTEXITCODE -eq 0) {
