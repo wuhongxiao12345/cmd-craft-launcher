@@ -1478,6 +1478,57 @@ function Get-LoaderName($cfg) {
   return 'fabric'
 }
 
+# 判断字符串是否本身就是 MC 版本号（如 1.20.1）
+function Test-McVersionId($s) {
+  return ($s -match '^1\.\d+(\.\d+)?$')
+}
+
+# 从版本 id 推断 NeoForge 对应的 MC 版本（21.1.x -> 1.21.1，20.4.x -> 1.20.4）
+function ConvertFrom-NeoForgeVer($neoVer) {
+  if ($neoVer -match '^(\d+)\.(\d+)\.') {
+    $a = $Matches[1]; $b = $Matches[2]
+    if ($b -eq '0') { return ('1.' + $a) }
+    return ('1.' + $a + '.' + $b)
+  }
+  return $null
+}
+
+# 取得真实的 Minecraft 版本号（去掉加载器前缀），必要时读版本 json 的 inheritsFrom
+function Get-McVersion($cfg) {
+  $id = $cfg.SelectedVersion
+  if (-not $id) { return $null }
+  if (Test-McVersionId $id) { return $id }
+
+  # fabric-loader-<loader>-<mc>
+  if ($id -match '^fabric-loader-(.+)-((\d+)\.(\d+)(?:\.(\d+))?)$') { return $Matches[2] }
+  # <mc>-forge-<ver>
+  if ($id -match '^((\d+)\.(\d+)(?:\.(\d+))?)-forge-(.+)$') { return $Matches[1] }
+  # neoforge-<ver>
+  if ($id -match '^neoforge-(.+)$') {
+    $nv = $Matches[1]
+    $guess = ConvertFrom-NeoForgeVer $nv
+    # 优先读本地版本 json 的 inheritsFrom（最准）
+    try {
+      $jp = Join-Path (Join-Path (Join-Path $script:McDir 'versions') $id) ($id + '.json')
+      if (Test-Path -LiteralPath $jp) {
+        $j = Get-Content -LiteralPath $jp -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($j.inheritsFrom -and (Test-McVersionId $j.inheritsFrom)) { return $j.inheritsFrom }
+      }
+    } catch {}
+    return $guess
+  }
+
+  # 其他带 inheritsFrom 的自定义版本
+  try {
+    $jp = Join-Path (Join-Path (Join-Path $script:McDir 'versions') $id) ($id + '.json')
+    if (Test-Path -LiteralPath $jp) {
+      $j = Get-Content -LiteralPath $jp -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($j.inheritsFrom -and (Test-McVersionId $j.inheritsFrom)) { return $j.inheritsFrom }
+    }
+  } catch {}
+  return $null
+}
+
 # 常用 Mod 中文→英文词典（键为中文，值为英文检索词，可多个用 | 分隔）
 function Get-ModDict {
   return @{
@@ -1594,17 +1645,24 @@ function Show-ModSearch {
   $cfg = Get-Config
   if (-not $cfg.SelectedVersion) { Write-Host '  请先在版本管理中选择一个版本' -ForegroundColor Yellow; Pause-Any; return }
   $loader = Get-LoaderName $cfg
+  $mcVer = Get-McVersion $cfg
+  if (-not $mcVer) {
+    Write-Host ('  无法从当前版本推断 Minecraft 版本: ' + $cfg.SelectedVersion) -ForegroundColor Red
+    Write-Host '  请在版本管理中选择一个标准版本后再试' -ForegroundColor Yellow
+    Pause-Any; return
+  }
   $q = $null
   $r = $null
   while ($true) {
     if ($null -eq $q) {
       Clear-Host
       Write-Host '=== Mod 搜索 (Modrinth) ===' -ForegroundColor Cyan
-      Write-Host ('  游戏版本: ' + $cfg.SelectedVersion + '   加载器: ' + $loader)
+      Write-Host ('  当前版本: ' + $cfg.SelectedVersion)
+      Write-Host ('  搜索条件: MC ' + $mcVer + ' / 加载器 ' + $loader) -ForegroundColor Green
       Write-Host '  支持模糊搜索与中文关键词（如 "钠" 搜 Sodium、"合成表" 搜 JEI）'
       $q = Read-Host '  搜索关键词 (留空返回)'
       if ([string]::IsNullOrWhiteSpace($q)) { return }
-      try { $r = Search-ModCombined $q $cfg.SelectedVersion $loader 20 }
+      try { $r = Search-ModCombined $q $mcVer $loader 20 }
       catch { Write-Host ('  搜索失败: ' + $_.Exception.Message) -ForegroundColor Red; Pause-Any; return }
     }
     if (-not $r.hits -or $r.hits.Count -eq 0) {
@@ -1639,11 +1697,21 @@ function Show-ModSearch {
 
 function Install-ModFromProject($slug, $cfg) {
   $loader = Get-LoaderName $cfg
-  $url = 'https://api.modrinth.com/v2/project/' + $slug + '/version?game_versions=' + [uri]::EscapeDataString('["' + $cfg.SelectedVersion + '"]') + '&loaders=' + [uri]::EscapeDataString('["' + $loader + '"]')
+  $mcVer = Get-McVersion $cfg
+  if (-not $mcVer) { Write-Host ('  无法确定 Minecraft 版本（当前: ' + $cfg.SelectedVersion + '）') -ForegroundColor Red; return }
+  Write-Host ('  目标: MC ' + $mcVer + ' / 加载器 ' + $loader) -ForegroundColor DarkGray
+  $url = 'https://api.modrinth.com/v2/project/' + $slug + '/version?game_versions=' + [uri]::EscapeDataString('["' + $mcVer + '"]') + '&loaders=' + [uri]::EscapeDataString('["' + $loader + '"]')
   $vers = $null
   try { $vers = Get-Json $url $null 0 } catch { Write-Host ('  获取版本失败: ' + $_.Exception.Message) -ForegroundColor Red; return }
-  if (-not $vers -or $vers.Count -eq 0) { Write-Host '  没有匹配当前版本/加载器的文件' -ForegroundColor Yellow; return }
+  if (-not $vers -or $vers.Count -eq 0) { Write-Host ('  没有匹配 MC ' + $mcVer + ' + ' + $loader + ' 的文件') -ForegroundColor Yellow; return }
   $v = $vers[0]
+  # 二次校验：返回文件的 loaders 必须包含当前加载器
+  $ok = $false
+  foreach ($ld in @($v.loaders)) { if ($ld -eq $loader) { $ok = $true; break } }
+  if (-not $ok) {
+    Write-Host ('  该文件不适用于 ' + $loader + '（可用: ' + ($v.loaders -join '/') + '）') -ForegroundColor Red
+    return
+  }
   $file = $null
   foreach ($f in $v.files) { if ($f.primary) { $file = $f; break } }
   if (-not $file) { $file = $v.files[0] }
@@ -1897,7 +1965,10 @@ function Show-ModMenu {
     $cfg = Get-Config
     $v = $cfg.SelectedVersion; if (-not $v) { $v = '(未选择)' }
     $loader = Get-LoaderName $cfg
-    Write-Host ('  目标: 版本 ' + $v + ' / 加载器 ' + $loader)
+    $mcv = Get-McVersion $cfg
+    if (-not $mcv) { $mcv = '(未知)' }
+    Write-Host ('  目标: 版本 ' + $v)
+    Write-Host ('        MC ' + $mcv + ' / 加载器 ' + $loader)
     Write-Host ''
     Write-Host '  1. 搜索并下载 Mod (Modrinth)'
     Write-Host '  2. 本地 Mod 管理 (启用/禁用/删除)'
