@@ -95,6 +95,7 @@ function Get-Config {
     DemoMode = $false
     ExtraGameArgs = ''
     VersionIsolation = $false
+    DebugMode = $false
   }
   if (Test-Path -LiteralPath $script:ConfigPath) {
     try {
@@ -1146,24 +1147,105 @@ function Start-Minecraft($id) {
     return
   }
 
-  Write-Host ''
-  Write-Host ('启动: ' + $java) -ForegroundColor Cyan
-  Write-Host ('版本: ' + $id + '  玩家: ' + $name) -ForegroundColor Cyan
-  Write-Host ''
+  $dbgMode = [bool]$cfg.DebugMode
+  $launchLog = $null
+
+  if ($dbgMode) {
+    # ---------- 调试模式：打印启动详情 ----------
+    Write-Host ''
+    Write-Host '════════ 调试模式 ════════' -ForegroundColor Magenta
+    Write-Host ('  Java      : ' + $java) -ForegroundColor Cyan
+    Write-Host ('  版本      : ' + $id)
+    Write-Host ('  加载器    : ' + $cfg.SelectedLoader + ' ' + $cfg.SelectedLoaderVersion)
+    Write-Host ('  玩家      : ' + $name)
+    Write-Host ('  工作目录  : ' + $gameDir)
+    Write-Host ('  内存      : ' + $mem + ' MB')
+    Write-Host ('  窗口      : ' + $w + ' x ' + $h)
+    if ($cfg.JvmArgs) { Write-Host ('  额外 JVM  : ' + $cfg.JvmArgs) }
+    if ($cfg.ExtraGameArgs) { Write-Host ('  额外游戏  : ' + $cfg.ExtraGameArgs) }
+    Write-Host ('  参数总数  : ' + $javaArgs.Count) -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  --- 完整启动参数 ---' -ForegroundColor DarkGray
+    $cpMarker = $false
+    for ($ai = 0; $ai -lt $javaArgs.Count; $ai++) {
+      $a = [string]$javaArgs[$ai]
+      if ($cpMarker) {
+        # 这一项是 classpath，逐条拆分显示
+        $cpMarker = $false
+        $entries = $a -split [regex]::Escape($script:CP)
+        Write-Host ('    [classpath] ' + $entries.Count + ' 项:') -ForegroundColor DarkGray
+        foreach ($e in $entries) { Write-Host ('      ' + $e) -ForegroundColor DarkGray }
+        continue
+      }
+      if ($a -eq '-cp' -or $a -eq '-classpath') { $cpMarker = $true; Write-Host ('    [' + $a + ']'); continue }
+      $disp = $a
+      if ($disp.Length -gt 180) { $disp = $disp.Substring(0, 150) + ' ... (' + $disp.Length + ' 字符)' }
+      Write-Host ('    [' + $disp + ']')
+    }
+    Write-Host '════════ 游戏输出 ════════' -ForegroundColor Magenta
+    Write-Host ''
+
+    # 准备日志文件
+    $logDir = Join-Path $script:CclDir 'logs'
+    if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+    $launchLog = Join-Path $logDir ('launch_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
+    try {
+      $hdr = 'CCL launcher debug log' + [char]13 + [char]10
+      $hdr += 'time   : ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + [char]13 + [char]10
+      $hdr += 'java   : ' + $java + [char]13 + [char]10
+      $hdr += 'game   : ' + $id + [char]13 + [char]10
+      $hdr += 'workdir: ' + $gameDir + [char]13 + [char]10
+      $hdr += ('-' * 60) + [char]13 + [char]10
+      [IO.File]::WriteAllText($launchLog, $hdr, (New-Object Text.UTF8Encoding($false)))
+      Write-Host ('  本次输出同时写入: ' + $launchLog) -ForegroundColor DarkGray
+      Write-Host ''
+    } catch { $launchLog = $null }
+  } else {
+    Write-Host ''
+    Write-Host ('启动: ' + $java) -ForegroundColor Cyan
+    Write-Host ('版本: ' + $id + '  玩家: ' + $name) -ForegroundColor Cyan
+    Write-Host ''
+  }
 
   if ($env:CCL_DEBUG) {
     $dbg = $java + ' ' + (($javaArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
     [IO.File]::WriteAllText((Join-Path $script:CclDir 'cmd.txt'), $dbg, [Text.Encoding]::UTF8)
   }
+
   $exitCode = 0
   $origDir = (Get-Location).Path
   try {
     if (Test-Path -LiteralPath $gameDir) { Set-Location -LiteralPath $gameDir }
-    & $java @javaArgs
-    $exitCode = $LASTEXITCODE
+    if ($dbgMode -and $launchLog) {
+      # 实时显示 + 追加到日志（用 StreamWriter 保证与头部同为 UTF-8）
+      $sw = New-Object IO.StreamWriter($launchLog, $true, (New-Object Text.UTF8Encoding($false)))
+      $sw.AutoFlush = $true
+      try {
+        & $java @javaArgs 2>&1 | ForEach-Object {
+          Write-Output $_
+          try { $sw.WriteLine([string]$_) } catch {}
+        }
+        $exitCode = $LASTEXITCODE
+      } finally {
+        try { $sw.Close() } catch {}
+      }
+    } else {
+      & $java @javaArgs
+      $exitCode = $LASTEXITCODE
+    }
   } finally {
     Set-Location -LiteralPath $origDir
   }
+
+  if ($dbgMode) {
+    Write-Host ''
+    Write-Host '════════ 游戏已退出 ════════' -ForegroundColor Magenta
+    Write-Host ('  退出码: ' + $exitCode)
+    if ($launchLog) { Write-Host ('  完整日志: ' + $launchLog) }
+    $gameLatest = Join-Path (Join-Path $gameDir 'logs') 'latest.log'
+    if (Test-Path -LiteralPath $gameLatest) { Write-Host ('  游戏日志: ' + $gameLatest) }
+  }
+
   Show-CrashDiagnosis $exitCode $gameDir
 }
 
@@ -1343,6 +1425,7 @@ function Show-Settings {
     Write-Host ('  7. 演示模式    : ' + $(if ($cfg.DemoMode) { '是' } else { '否' }))
     $eg = $cfg.ExtraGameArgs; if (-not $eg) { $eg = '(无)' }
     Write-Host ('  8. 额外游戏参数: ' + $eg)
+    Write-Host ('  9. 调试模式    : ' + $(if ($cfg.DebugMode) { '开（显示启动详情 + 输出写日志）' } else { '关' }))
     Write-Host '  0. 返回'
     $in = Read-Host '  > '
     switch ($in) {
@@ -1373,6 +1456,11 @@ function Show-Settings {
       '6' { $cfg.Fullscreen = (-not $cfg.Fullscreen); Save-Config $cfg; Write-Host ('  全屏: ' + $(if ($cfg.Fullscreen) { '开' } else { '关' })) -ForegroundColor Green; Start-Sleep -Milliseconds 600 }
       '7' { $cfg.DemoMode = (-not $cfg.DemoMode); Save-Config $cfg; Write-Host ('  演示模式: ' + $(if ($cfg.DemoMode) { '开' } else { '关' })) -ForegroundColor Green; Start-Sleep -Milliseconds 600 }
       '8' { $e = Read-Host '  输入额外游戏参数 (空格分隔)'; $cfg.ExtraGameArgs = $e; Save-Config $cfg }
+      '9' {
+        $cfg.DebugMode = (-not $cfg.DebugMode); Save-Config $cfg
+        Write-Host ('  调试模式: ' + $(if ($cfg.DebugMode) { '开' } else { '关' })) -ForegroundColor Green
+        Start-Sleep -Milliseconds 600
+      }
       '0' { return }
     }
   }

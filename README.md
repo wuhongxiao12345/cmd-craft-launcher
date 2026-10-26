@@ -68,6 +68,13 @@
 
 并展示最近关键日志行、完整日志路径、崩溃报告目录。
 
+### 调试模式
+- 在「7. 设置 → 9. 调试模式」开启
+- 启动时打印完整参数列表：Java 路径、版本、加载器、工作目录、内存、窗口、额外参数，classpath 逐条展开
+- 游戏运行期间的 stdout/stderr **实时显示在控制台**，同时写入 `ccl/logs/launch_<时间戳>.log`（UTF-8，AutoFlush，可边玩边 tail）
+- 游戏退出后显示退出码、本次日志路径、游戏 `logs/latest.log` 路径
+- 与崩溃诊断联动：异常退出时同样触发中文排查建议
+
 ### 其他
 - **离线登录**：按 `MD5("OfflinePlayer:名称")` 生成 v3 UUID
 - **默认中文**：首次启动写入 `options.txt` 的 `lang:zh_cn`
@@ -148,6 +155,7 @@
 | `ExtraGameArgs` | 额外游戏参数 | 空 |
 | `Fullscreen` | 全屏启动 | `false` |
 | `DemoMode` | 演示模式 | `false` |
+| `DebugMode` | 调试模式（打印启动参数 + 输出写入 `ccl/logs/`） | `false` |
 | `VersionIsolation` | 版本隔离（`PCL.ini` 优先） | `false` |
 
 配置写入是**原子**的（先写 `.tmp` 再替换，保留 `.bak`）；文件损坏时自动备份为 `.corrupt` 并回退默认值；数值字段读取时自动钳制。
@@ -184,6 +192,9 @@ A：v1.0.1 已改用 `-LiteralPath`，不会再把方括号当通配符。
 
 **Q：想用已有 PCL2 的 `.minecraft`？**
 A：直接把 `ccl.bat` 放到 PCL2 根目录即可，会读取 `PCL.ini` 并识别既有版本/隔离结构。
+
+**Q：游戏启动失败，想看详细过程？**
+A：在「7. 设置 → 9. 调试模式」开启后启动，会打印完整 JVM/游戏参数（classpath 逐条展开），并把游戏输出实时写入 `ccl/logs/launch_<时间戳>.log`。异常退出时还会附带崩溃诊断。
 
 **Q：中文搜 Mod 搜不到结果？**
 A：中文搜索依赖麦块开放 API（`api.minekuai.cn`）。若该服务不可达，程序会自动降级到 Modrinth 原生搜索，此时中文关键词效果较差，建议改用英文名（如 `sodium`、`jei`）。
