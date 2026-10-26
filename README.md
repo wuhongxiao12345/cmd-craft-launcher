@@ -123,6 +123,7 @@
 ├─ ccl/
 │  ├─ config.json          配置
 │  ├─ cache/               下载缓存、临时文件、后台任务日志
+│  ├─ logs/                调试模式启动日志（launch_<时间戳>.log）
 │  └─ java/                自动安装的 JDK（jdk8 / jdk17 / jdk21）
 └─ .minecraft/
    ├─ versions/            各版本（含 <id>-natives 或 natives/）
