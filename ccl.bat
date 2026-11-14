@@ -73,11 +73,6 @@ if (-not (Test-CommandExists 'curl.exe')) {
 $lpFile = Join-Path $script:McDir 'launcher_profiles.json'
 if (-not (Test-Path -LiteralPath $lpFile)) { try { [IO.File]::WriteAllText($lpFile, '{}', [Text.Encoding]::UTF8) } catch {} }
 
-function Pause-Any {
-  if ($script:NonInteractive) { return }
-  Write-Host ''; [void](Read-Host '按回车继续')
-}
-
 function Get-Config {
   $d = [ordered]@{
     PlayerName = 'Player'
@@ -85,7 +80,6 @@ function Get-Config {
     SelectedVersion = ''
     SelectedLoader = 'vanilla'
     SelectedLoaderVersion = ''
-    EnabledMods = @()
     MemoryMB = 2048
     WindowWidth = 854
     WindowHeight = 480
@@ -208,7 +202,7 @@ function Get-Json {
   $tryUrls = Get-UrlWithMirror $url
   foreach ($u in $tryUrls) {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
-      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 30 -A 'ccl-launcher/1.0.2' -o $tmp $u
+      & curl.exe -s -f -L --ssl-no-revoke --retry 1 -m 30 -A 'ccl-launcher/1.0.3-beta' -o $tmp $u
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
         $txt = [IO.File]::ReadAllText($tmp)
         if ($txt.Trim()) { $ok = $true; break }
@@ -247,84 +241,94 @@ function Draw-ProgressBar($done, $total, $extra = '') {
   Write-Host ([char]13 + $line) -NoNewline
 }
 
+function Test-FileHashMatch($path, $sha1, $sha512) {
+  if ($sha1) {
+    try { if ((Get-FileHash -LiteralPath $path -Algorithm SHA1).Hash -ne ([string]$sha1).ToUpper()) { return $false } } catch { return $false }
+  }
+  if ($sha512) {
+    try { if ((Get-FileHash -LiteralPath $path -Algorithm SHA512).Hash -ne ([string]$sha512).ToUpper()) { return $false } } catch { return $false }
+  }
+  return $true
+}
+
 function Download-File {
-  param($url, $dest, $sha1, $showProgress = $false)
+  param($url, $dest, $sha1, $showProgress = $false, $sha512 = $null)
   if (Test-Path -LiteralPath $dest) {
-    if (-not $sha1) { return }
-    try { if ((Get-FileHash -LiteralPath $dest -Algorithm SHA1).Hash -eq $sha1.ToUpper()) { return } } catch {}
+    if (-not $sha1 -and -not $sha512) { return }
+    if (Test-FileHashMatch $dest $sha1 $sha512) { return }
   }
   $dir = Split-Path -Parent $dest
   if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
   $tmp = $dest + '.tmp'
   if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue }
-  $allUrls = Get-UrlWithMirror $url
+  $allUrls = @(Get-UrlWithMirror $url)
+  $ua = 'ccl-launcher/1.0.3-beta'
   if (-not $showProgress) {
     $ok = $false
     foreach ($u in $allUrls) {
-      & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0.2' -o $tmp $u
+      & curl.exe -s -f -L --ssl-no-revoke --retry 1 -m 120 -A $ua -o $tmp $u
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
-        if ($sha1) {
-          $got = (Get-FileHash -LiteralPath $tmp -Algorithm SHA1).Hash
-          if ($got -eq $sha1.ToUpper()) { $ok = $true; break }
-        } else { $ok = $true; break }
+        if (Test-FileHashMatch $tmp $sha1 $sha512) { $ok = $true; break }
       }
       Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue
     }
-    if (-not $ok) { throw ('下载失败: ' + $url) }
+    if (-not $ok) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; throw ('下载失败: ' + $url) }
   } else {
-    # 按顺序尝试各镜像地址，遇到可用源再启动进度下载
-    $useUrl = $null
+    # 先用 HEAD 探测可用源与大小，避免为探测整包下载一次
+    $cands = New-Object System.Collections.ArrayList
+    $sizeMap = @{}
     foreach ($u in $allUrls) {
-      $totalSize = [int64]0
+      $sz = [int64]0; $headOk = $false
       try {
-        $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 8 -A 'ccl-launcher/1.0.2' $u 2>$null
-        foreach ($ln in $hdr) { if ($ln -match '(?i)content-length:\s*(\d+)') { $totalSize = [int64]$Matches[1]; break } }
+        $hdr = & curl.exe -s -f -I -L --ssl-no-revoke -m 10 -A $ua $u 2>$null
+        if ($LASTEXITCODE -eq 0) {
+          $headOk = $true
+          foreach ($ln in $hdr) { if ($ln -match '(?i)content-length:\s*(\d+)') { $sz = [int64]$Matches[1]; break } }
+        }
       } catch {}
-      # 尝试下载（小超时探测）
-      & curl.exe -s -L --ssl-no-revoke -m 20 -A 'ccl-launcher/1.0.2' -o $tmp $u
-      if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) {
-        $useUrl = $u; Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; break
-      }
+      $sizeMap[$u] = $sz
+      if ($headOk) { [void]$cands.Add($u) }
+    }
+    # HEAD 全部失败时退回按原顺序直接下载（部分 CDN 不支持 HEAD）
+    if ($cands.Count -eq 0) { foreach ($u in $allUrls) { [void]$cands.Add($u) } }
+
+    $ok = $false
+    foreach ($useUrl in $cands) {
+      $totalSize = [int64]0
+      if ($sizeMap.ContainsKey($useUrl)) { $totalSize = [int64]$sizeMap[$useUrl] }
       Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue
-    }
-    if (-not $useUrl) { throw ('下载失败(所有镜像不可用): ' + $url) }
-    $totalSize = [int64]0
-    try {
-      $hdr = & curl.exe -s -I -L --ssl-no-revoke -m 30 -A 'ccl-launcher/1.0.2' $useUrl 2>$null
-      foreach ($ln in $hdr) { if ($ln -match '(?i)content-length:\s*(\d+)') { $totalSize = [int64]$Matches[1]; break } }
-    } catch {}
-    $proc = Start-Process -FilePath 'curl.exe' -ArgumentList @('-s','-L','--ssl-no-revoke','--retry','2','-m','900','-A','ccl-launcher/1.0.2','-o',$tmp,$useUrl) -PassThru -WindowStyle Hidden
-    $lastT = [DateTime]::Now; $lastB = [int64]0
-    while (-not $proc.HasExited) {
-      $cur = [int64]0
-      if (Test-Path -LiteralPath $tmp) { try { $cur = (Get-Item -LiteralPath $tmp).Length } catch {} }
-      $now = [DateTime]::Now
-      $spd = ''
-      if (($now - $lastT).TotalMilliseconds -ge 500) {
-        $bps = ($cur - $lastB) / ($now - $lastT).TotalSeconds
-        if ($bps -gt 0) { $spd = '  ' + (Format-Bytes ([int64]$bps)) + '/s' }
-        $lastT = $now; $lastB = $cur
+      $proc = Start-Process -FilePath 'curl.exe' -ArgumentList @('-s','-f','-L','--ssl-no-revoke','--retry','2','-m','1800','-A',$ua,'-o',$tmp,$useUrl) -PassThru -WindowStyle Hidden
+      $lastT = [DateTime]::Now; $lastB = [int64]0
+      while (-not $proc.HasExited) {
+        $cur = [int64]0
+        if (Test-Path -LiteralPath $tmp) { try { $cur = (Get-Item -LiteralPath $tmp).Length } catch {} }
+        $now = [DateTime]::Now
+        $spd = ''
+        if (($now - $lastT).TotalMilliseconds -ge 500) {
+          $bps = ($cur - $lastB) / ($now - $lastT).TotalSeconds
+          if ($bps -gt 0) { $spd = '  ' + (Format-Bytes ([int64]$bps)) + '/s' }
+          $lastT = $now; $lastB = $cur
+        }
+        if ($totalSize -gt 0) {
+          if ($cur -gt $totalSize) { $totalSize = $cur }
+          Draw-ProgressBar $cur $totalSize ((Format-Bytes $cur) + ' / ' + (Format-Bytes $totalSize) + $spd)
+        } else {
+          $spin = '|/-\'[($cur / 1048576) % 4]
+          Write-Host ([char]13 + '  ' + $spin + '  ' + (Format-Bytes $cur) + $spd + '   ') -NoNewline
+        }
+        Start-Sleep -Milliseconds 250
       }
-      if ($totalSize -gt 0) {
-        if ($cur -gt $totalSize) { $totalSize = $cur }
-        Draw-ProgressBar $cur $totalSize ((Format-Bytes $cur) + ' / ' + (Format-Bytes $totalSize) + $spd)
-      } else {
-        $spin = '|/-\'[($cur / 1048576) % 4]
-        Write-Host ([char]13 + '  ' + $spin + '  ' + (Format-Bytes $cur) + $spd + '   ') -NoNewline
-      }
-      Start-Sleep -Milliseconds 250
+      $finalSize = [int64]0
+      if (Test-Path -LiteralPath $tmp) { try { $finalSize = (Get-Item -LiteralPath $tmp).Length } catch {} }
+      if ($totalSize -le 0) { $totalSize = $finalSize }
+      Draw-ProgressBar $totalSize $totalSize ((Format-Bytes $finalSize) + ' / ' + (Format-Bytes $totalSize))
+      Write-Host ''
+      if ($proc.ExitCode -ne 0) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; continue }
+      if (-not (Test-Path -LiteralPath $tmp) -or (Get-Item -LiteralPath $tmp).Length -eq 0) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; continue }
+      if (-not (Test-FileHashMatch $tmp $sha1 $sha512)) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; continue }
+      $ok = $true; break
     }
-    $finalSize = [int64]0
-    if (Test-Path -LiteralPath $tmp) { try { $finalSize = (Get-Item -LiteralPath $tmp).Length } catch {} }
-    if ($totalSize -le 0) { $totalSize = $finalSize }
-    Draw-ProgressBar $totalSize $totalSize ((Format-Bytes $finalSize) + ' / ' + (Format-Bytes $totalSize))
-    Write-Host ''
-    if ($proc.ExitCode -ne 0) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; throw ('下载失败: ' + $url) }
-    if (-not (Test-Path -LiteralPath $tmp) -or (Get-Item -LiteralPath $tmp).Length -eq 0) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; throw ('下载内容为空: ' + $url) }
-    if ($sha1) {
-      $got = (Get-FileHash -LiteralPath $tmp -Algorithm SHA1).Hash
-      if ($got -ne $sha1.ToUpper()) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; throw ('校验失败(SHA1不匹配): ' + $url) }
-    }
+    if (-not $ok) { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; throw ('下载失败(所有镜像不可用或校验不通过): ' + $url) }
   }
   Move-Item -LiteralPath $tmp -Destination $dest -Force
 }
@@ -366,7 +370,7 @@ try {
   $urls = @($url) + @($altUrls)
   $downloaded = $false
   foreach ($u in $urls) {
-    & curl.exe -s -L --ssl-no-revoke --retry 1 -m 60 -A 'ccl-launcher/1.0.2' -o $tmp $u
+    & curl.exe -s -f -L --ssl-no-revoke --retry 1 -m 120 -A 'ccl-launcher/1.0.3-beta' -o $tmp $u
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item -LiteralPath $tmp).Length -gt 0) { $downloaded = $true; break }
     Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue
   }
@@ -409,6 +413,7 @@ function Download-Pool {
     if ($done -gt $lastDoneSnap) { $lastDoneSnap = $done; $lastProgressT = [DateTime]::Now }
     elseif (([DateTime]::Now - $lastProgressT).TotalSeconds -gt 90) { Write-Host ''; Write-Host '  下载停滞超过90s（网络不可达），终止' -ForegroundColor Yellow; break }
     $bytesNow = [int64]0
+    $activeDirs = @{}
     foreach ($h in $handles) {
       if ($h.Finished) {
         if (Test-Path -LiteralPath $h.Dest) { try { $bytesNow += (Get-Item -LiteralPath $h.Dest).Length } catch {} }
@@ -422,10 +427,17 @@ function Download-Pool {
         if (-not $h.Ok) { [void]$failed.Add($h.Url) }
         if (Test-Path -LiteralPath $h.Dest) { try { $bytesNow += (Get-Item -LiteralPath $h.Dest).Length } catch {} }
       } else {
-        $tmpLen = 0
-        try { $tp = Get-ChildItem -LiteralPath (Split-Path -Parent $h.Dest) -Filter ((Split-Path -Leaf $h.Dest) + '.*.tmp') -EA SilentlyContinue | Measure-Object Length -Sum; if ($tp.Sum) { $tmpLen = $tp.Sum } } catch {}
-        $bytesNow += $tmpLen
+        $pd = $null
+        try { $pd = Split-Path -Parent $h.Dest } catch {}
+        if ($pd) { $activeDirs[$pd] = $true }
       }
+    }
+    # 同一目录的临时文件只统计一次，避免每个任务都扫描目录（资源文件有数千个）
+    foreach ($pd in $activeDirs.Keys) {
+      try {
+        $sum = (Get-ChildItem -LiteralPath $pd -Filter '*.tmp' -File -EA SilentlyContinue | Measure-Object Length -Sum).Sum
+        if ($sum) { $bytesNow += [int64]$sum }
+      } catch {}
     }
     $now = [DateTime]::Now
     $spd = ''
@@ -473,7 +485,14 @@ function Download-Pool {
         }
         if ($pending -gt 0) { Start-Sleep -Milliseconds 250 }
       }
-      foreach ($h in $h2) { if (-not $h.Done) { try { $h.PS.Stop() } catch {}; try { $h.PS.Dispose() } catch {} } }
+      foreach ($h in $h2) {
+        if (-not $h.Done) {
+          # 超时未完成的项同样算失败，不能静默当作成功
+          [void]$failed2.Add($h.Url)
+          try { $h.PS.Stop() } catch {}
+          try { $h.PS.Dispose() } catch {}
+        }
+      }
       try { $pool2.Close() } catch {}; try { $pool2.Dispose() } catch {}
       return @($failed2)
     }
@@ -555,7 +574,7 @@ function Resolve-Version($id) {
   }
   foreach ($e in $rev) {
     $j = $e.Json
-    foreach ($k in @('type','mainClass','assets','assetIndex','downloads','javaVersion')) {
+    foreach ($k in @('type','mainClass','assets','assetIndex','downloads','javaVersion','logging')) {
       if ($null -ne $j.PSObject.Properties[$k] -and $null -ne $j.$k) { $meta[$k] = $j.$k }
     }
     if ($null -ne $j.PSObject.Properties['minecraftArguments'] -and $j.minecraftArguments) { $meta.legacyArgs = $j.minecraftArguments }
@@ -599,7 +618,7 @@ function Resolve-Args($list, $features = @{}) {
   return $out
 }
 
-function Install-Version($id) {
+function Install-Version($id, $select = $true) {
   Write-Host ('正在解析版本 ' + $id + ' ...') -ForegroundColor DarkGray
   $res = Resolve-Version $id
   if (-not $res.downloads -or -not $res.downloads.client) { throw '该版本缺少客户端下载信息' }
@@ -657,6 +676,8 @@ function Install-Version($id) {
 
   $nativesDir = Join-Path (Join-Path (Join-Path $script:McDir 'versions') $res.baseId) 'natives'
   if (-not (Test-Path -LiteralPath $nativesDir)) { New-Item -ItemType Directory -Force -Path $nativesDir | Out-Null }
+  # 清理旧的 natives，避免版本更新后残留旧 DLL 造成冲突
+  Get-ChildItem -LiteralPath $nativesDir -File -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   foreach ($nj in $nativeJars) {
     if (-not (Test-Path -LiteralPath $nj)) { continue }
@@ -691,6 +712,24 @@ function Install-Version($id) {
     Write-Host ('下载游戏资源 (' + $aitems.Count + ')') -ForegroundColor DarkGray
     $f2 = Download-Pool $aitems (Get-DlThreads) '游戏资源'
     if ($f2.Count -gt 0) { Write-Host ('  有 ' + $f2.Count + ' 个资源下载失败') -ForegroundColor Yellow }
+
+    # 旧版资源索引（virtual / map_to_resources）需要把 objects 展开成资源目录
+    if ($idx.virtual -or $idx.map_to_resources) {
+      $vRoot = if ($idx.map_to_resources) { Join-Path $script:McDir 'resources' } else { Join-Path (Join-Path (Join-Path $script:McDir 'assets') 'virtual') $res.assetIndex.id }
+      $cnt = 0
+      foreach ($p in $idx.objects.PSObject.Properties) {
+        $h = [string]$p.Value.hash
+        if (-not $h -or $h.Length -lt 2) { continue }
+        $src = Join-Path (Join-Path $objRoot $h.Substring(0,2)) $h
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        $dst = Join-Path $vRoot ($p.Name -replace '/', $script:Sep)
+        $dstDir = Split-Path -Parent $dst
+        if (-not (Test-Path -LiteralPath $dstDir)) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
+        Copy-Item -LiteralPath $src -Destination $dst -Force -EA SilentlyContinue
+        $cnt++
+      }
+      Write-Host ('  已生成旧版资源目录 (' + $cnt + ' 项)') -ForegroundColor DarkGray
+    }
   }
 
   # 兼容：仅当用户已启用版本隔离（PCL.ini 或已有隔离结构）时才补齐隔离子目录
@@ -710,9 +749,13 @@ function Install-Version($id) {
     Write-Host '  警告: 客户端主文件体积异常，可能下载不完整' -ForegroundColor Yellow
   }
 
-  $cfg = Get-Config
-  $cfg.SelectedVersion = $id
-  Save-Config $cfg
+  if ($select) {
+    $cfg = Get-Config
+    $cfg.SelectedVersion = $id
+    # 安装后选中新版本时回到默认游戏目录，避免沿用上一个整合包实例的目录
+    if ($cfg.GameDir) { $cfg.GameDir = ''; Write-Host '  已切回默认游戏目录（原独立目录已取消）' -ForegroundColor DarkGray }
+    Save-Config $cfg
+  }
   $failTotal = 0
   if ($f1) { $failTotal += $f1.Count }
   if ($f2) { $failTotal += $f2.Count }
@@ -739,7 +782,7 @@ function Find-Java {
   return $javas[0]
 }
 
-# 按所需版本挑选 Java：优先 config，其次 ccljava 下满足版本要求的，最后系统 java
+# 按所需版本挑选 Java：在所有候选中选“刚好满足需求的最低版本”，都不满足时选最高版本
 function Find-JavaFor($needMajor) {
   $cfg = Get-Config
   $candidates = New-Object System.Collections.ArrayList
@@ -753,11 +796,14 @@ function Find-JavaFor($needMajor) {
   $sys = Get-Command java.exe -ErrorAction SilentlyContinue
   if ($sys) { [void]$candidates.Add($sys.Source) }
   $best = $null; $bestVer = -1
+  $sat = $null; $satVer = [int]::MaxValue
   foreach ($c in $candidates) {
     $v = Get-JavaVersion $c
-    if ($v -ge $needMajor) { return $c }
-    if ($v -gt $bestVer) { $bestVer = $v; $best = $c }
+    if ($v -ge $needMajor) { if ($v -lt $satVer) { $satVer = $v; $sat = $c } }
+    elseif ($v -gt $bestVer) { $bestVer = $v; $best = $c }
   }
+  # 优先选“刚好够用”的最低版本，避免 1.17 版本被拉到 Java 21
+  if ($sat) { return $sat }
   return $best
 }
 
@@ -782,7 +828,7 @@ function Get-TunaJavaUrl($major) {
   $dir = 'https://mirrors.tuna.tsinghua.edu.cn/Adoptium/' + $major + '/jdk/' + $archDir + '/windows/'
   try {
     $tmp = Join-Path $script:CacheDir ('tuna_' + $major + '.html')
-    & curl.exe -s -L --ssl-no-revoke -m 30 -o $tmp $dir
+    & curl.exe -s -f -L --ssl-no-revoke -m 30 -o $tmp $dir
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmp)) { return $null }
     $html = [IO.File]::ReadAllText($tmp)
     Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue
@@ -830,9 +876,7 @@ function Install-Java($major) {
   Remove-Item -LiteralPath $zip -Force -EA SilentlyContinue
   $exe = Join-Path (Join-Path $target 'bin') 'java.exe'
   if (Test-Path -LiteralPath $exe) {
-    $cfg = Get-Config
-    $cfg.JavaPath = $exe
-    Save-Config $cfg
+    # 不自动写 JavaPath：启动时按版本需求挑选，避免装过 JDK8 后所有版本都被钉在 8
     Write-Host ('Java ' + $major + ' 安装完成: ' + $exe) -ForegroundColor Green
   } else { throw 'Java 解压后未找到 java.exe' }
 }
@@ -854,14 +898,12 @@ function Ensure-DefaultLang($gameDir) {
       [IO.File]::WriteAllText($opt, "lang:zh_cn" + [char]13 + [char]10, (New-Object Text.UTF8Encoding($false)))
       return
     }
-    $lines = [IO.File]::ReadAllLines($opt, [Text.Encoding]::UTF8)
-    $found = $false; $out = New-Object System.Collections.ArrayList
-    foreach ($ln in $lines) {
-      if ($ln -like 'lang:*') { $found = $true; [void]$out.Add('lang:zh_cn') }
-      else { [void]$out.Add($ln) }
-    }
-    if (-not $found) { [void]$out.Add('lang:zh_cn') }
-    [IO.File]::WriteAllLines($opt, $out, (New-Object Text.UTF8Encoding($false)))
+    # 已有语言设置时保留用户选择，只在完全没有 lang 行时补默认值
+    $raw = [IO.File]::ReadAllText($opt, [Text.Encoding]::UTF8)
+    if ($raw -match '(?m)^lang:') { return }
+    $prefix = ''
+    if ($raw.Length -gt 0 -and -not $raw.EndsWith([string][char]10)) { $prefix = [string][char]13 + [string][char]10 }
+    [IO.File]::AppendAllText($opt, $prefix + 'lang:zh_cn' + [char]13 + [char]10, (New-Object Text.UTF8Encoding($false)))
   } catch {}
 }
 
@@ -981,7 +1023,7 @@ function Start-Minecraft($id) {
     Write-Host ('客户端 ' + $res.baseId + ' 尚未安装，是否现在下载? (Y/n)') -ForegroundColor Yellow
     $ans = Read-Host
     if ($ans -match '^[Nn]') { throw ('客户端未安装: ' + $res.baseId) }
-    Install-Version $res.baseId
+    Install-Version $res.baseId $false
     if (-not (Test-Path -LiteralPath $clientJar)) { throw ('客户端安装后仍缺失: ' + $res.baseId) }
   }
   $nativesDir = Find-NativesDir $id $res.baseId
@@ -991,7 +1033,7 @@ function Start-Minecraft($id) {
       $nativesDir = Join-Path (Join-Path (Join-Path $script:McDir 'versions') $res.baseId) 'natives'
     } else {
       Write-Host '检测到本地库(natives)缺失，正在补齐基础版本...' -ForegroundColor Yellow
-      try { Install-Version $res.baseId } catch { Write-Host ('  补齐失败: ' + $_.Exception.Message) -ForegroundColor Red }
+      try { Install-Version $res.baseId $false } catch { Write-Host ('  补齐失败: ' + $_.Exception.Message) -ForegroundColor Red }
       $nativesDir = Find-NativesDir $id $res.baseId
       if (-not $nativesDir) { $nativesDir = Join-Path (Join-Path (Join-Path $script:McDir 'versions') $res.baseId) 'natives' }
     }
@@ -1063,6 +1105,18 @@ function Start-Minecraft($id) {
 
   $assetsRoot = Join-Path $script:McDir 'assets'
   $assetIndex = if ($res.assetIndex) { $res.assetIndex.id } else { $res.assets }
+
+  # 官方 log4j 配置（版本 JSON 的 logging 字段）
+  $logCfgArg = $null
+  if ($res.logging -and $res.logging.client -and $res.logging.client.file -and $res.logging.client.argument) {
+    $lf = $res.logging.client.file
+    $logCfgPath = Join-Path (Join-Path (Join-Path $script:McDir 'assets') 'log_configs') $lf.id
+    if (-not (Test-Path -LiteralPath $logCfgPath) -and -not $script:DryRun) {
+      try { Download-File $lf.url $logCfgPath $lf.sha1 } catch {}
+    }
+    if (Test-Path -LiteralPath $logCfgPath) { $logCfgArg = ([string]$res.logging.client.argument).Replace('${path}', $logCfgPath) }
+  }
+
   $name = $cfg.PlayerName
   if (-not $name) { $name = 'Player' }
   $uuid = Get-OfflineUuid $name
@@ -1078,7 +1132,7 @@ function Start-Minecraft($id) {
     classpath = $classpath
     natives_directory = $nativesDir
     launcher_name = 'ccl'
-    launcher_version = '1.0.2'
+    launcher_version = '1.0.3-beta'
     auth_player_name = $name
     version_name = $id
     game_directory = $gameDir
@@ -1089,9 +1143,10 @@ function Start-Minecraft($id) {
     clientid = '0'
     auth_xuid = '0'
     user_type = 'legacy'
+    auth_session = ('token:' + $token + ':' + $uuid)
     version_type = $res.type
     user_properties = '{}'
-    game_assets = (Join-Path $assetsRoot 'virtual/legacy')
+    game_assets = (Join-Path (Join-Path $assetsRoot 'virtual') $(if ($assetIndex) { $assetIndex } else { 'legacy' }))
     library_directory = $libRoot
     classpath_separator = $script:CP
     resolution_width = [string]$w
@@ -1114,6 +1169,8 @@ function Start-Minecraft($id) {
   if ($cfg.JvmArgs) {
     foreach ($x in ($cfg.JvmArgs -split '\s+')) { if ($x) { [void]$argsList.Add($x) } }
   }
+
+  if ($logCfgArg -and -not ($argsList -match 'log4j\.configurationFile')) { [void]$argsList.Add($logCfgArg) }
 
   [void]$argsList.Add($res.mainClass)
 
@@ -1272,200 +1329,6 @@ function Sort-Versions($versions) {
   return @(($rel + $non) | ForEach-Object { $_.V })
 }
 
-function Select-Version($releaseOnly = $false) {
-  Write-Host '正在获取版本列表...' -ForegroundColor DarkGray
-  $man = Get-VersionManifest
-  $all = Sort-Versions $man.versions
-  if ($releaseOnly) { $all = @($all | Where-Object { $_.type -eq 'release' }) }
-  $page = 0; $size = 20
-  while ($true) {
-    Clear-Host
-    Write-Host '=== 可用版本 ===' -ForegroundColor Cyan
-    $start = $page * $size
-    $end = [Math]::Min($start + $size, $all.Count) - 1
-    for ($i = $start; $i -le $end; $i++) {
-      $v = $all[$i]
-      $tag = '[正式]'
-      if ($v.type -eq 'snapshot') { $tag = '[快照]' }
-      elseif ($v.type -ne 'release') { $tag = '[' + $v.type + ']' }
-      Write-Host ('  {0,4}. {1} {2}' -f ($i + 1), $v.id, $tag)
-    }
-    Write-Host ''
-    $pages = [Math]::Max(1, [Math]::Ceiling($all.Count / $size))
-    Write-Host ('  第 ' + ($page + 1) + '/' + $pages + ' 页') -ForegroundColor DarkGray
-    Write-Host '  输入序号选择; n=下页 p=上页 q=返回'
-    $in = Read-Host '  > '
-    if ($in -eq 'q') { return $null }
-    elseif ($in -eq 'n') { if ($end -lt $all.Count - 1) { $page++ } }
-    elseif ($in -eq 'p') { if ($page -gt 0) { $page-- } }
-    elseif ($in -match '^[0-9]+$') {
-      $idx = [int]$in - 1
-      if ($idx -ge 0 -and $idx -lt $all.Count) { return $all[$idx] }
-    }
-  }
-}
-
-function Show-VersionMenu {
-  while ($true) {
-    Clear-Host
-    Write-Host '=== 版本管理 ===' -ForegroundColor Cyan
-    Write-Host '  1. 查看并下载官方版本'
-    Write-Host '  2. 列出已安装版本'
-    Write-Host '  0. 返回'
-    $in = Read-Host '  > '
-    if ($in -eq '1') {
-      $v = Select-Version $false
-      if ($v) {
-        Write-Host ''
-        Write-Host ('  准备安装版本 ' + $v.id) -ForegroundColor Cyan
-        Write-Host '  1. 前台安装（显示进度，需等待完成）'
-        Write-Host '  2. 后台安装（可继续其他操作）'
-        Write-Host '  0. 取消'
-        $m = Read-Host '  > '
-        if ($m -eq '2') {
-          Start-BackgroundInstall $v.id
-          Pause-Any
-        } elseif ($m -eq '1' -or $m -eq '') {
-          Install-Version $v.id
-          Pause-Any
-        }
-      }
-    } elseif ($in -eq '2') {
-      $vd = Join-Path $script:McDir 'versions'
-      $vers = @()
-      if (Test-Path -LiteralPath $vd) { $vers = @(Get-ChildItem -LiteralPath $vd -Directory | Select-Object -ExpandProperty Name) }
-      if ($vers.Count -eq 0) { Write-Host '  尚无已安装版本' -ForegroundColor Yellow; Pause-Any; continue }
-      Clear-Host
-      Write-Host '=== 已安装版本 ===' -ForegroundColor Cyan
-      $cur = (Get-Config).SelectedVersion
-      for ($i=0; $i -lt $vers.Count; $i++) {
-        $mark = '  '
-        if ($vers[$i] -eq $cur) { $mark = '* ' }
-        Write-Host ($mark + ($i+1) + '. ' + $vers[$i])
-      }
-      Write-Host ''
-      Write-Host '  序号=切换当前版本   d序号=删除   q=返回'
-      $sel = Read-Host '  > '
-      if ($sel -eq 'q' -or $sel -eq '') { continue }
-      $cfg = Get-Config
-      if ($sel -match '^[dD]([0-9]+)$') {
-        $n = [int]$Matches[1]
-        if ($n -ge 1 -and $n -le $vers.Count) {
-          $name = $vers[$n-1]
-          if ($name -eq $cur) { Write-Host '  不能删除当前正在使用的版本，请先切换' -ForegroundColor Red; Pause-Any; continue }
-          $ans = Read-Host ('  确认删除 ' + $name + ' ? (y/N)')
-          if ($ans -match '^[Yy]') {
-            try { Remove-Item -LiteralPath (Join-Path $vd $name) -Recurse -Force; Write-Host '  已删除' -ForegroundColor Green }
-            catch { Write-Host ('  删除失败: ' + $_.Exception.Message) -ForegroundColor Red }
-          }
-          Pause-Any
-        }
-      } elseif ($sel -match '^[0-9]+$') {
-        $n = [int]$sel
-        if ($n -ge 1 -and $n -le $vers.Count) {
-          $vn = $vers[$n-1]
-          $cfg.SelectedVersion = $vn
-          $cfg.SelectedLoaderVersion = ''
-          if ($vn -match '^fabric-loader-(.+)-([0-9].*)$') { $cfg.SelectedLoader = 'fabric'; $cfg.SelectedLoaderVersion = $Matches[1] }
-          elseif ($vn -match '^(.+)-forge-(.+)$') { $cfg.SelectedLoader = 'forge'; $cfg.SelectedLoaderVersion = $Matches[2] }
-          else { $cfg.SelectedLoader = 'vanilla' }
-          Save-Config $cfg
-          Write-Host ('  已切换到: ' + $cfg.SelectedVersion) -ForegroundColor Green
-          Pause-Any
-        }
-      }
-    } elseif ($in -eq '0') { return }
-  }
-}
-
-function Show-JavaMenu {
-  while ($true) {
-    Clear-Host
-    Write-Host '=== Java 管理 ===' -ForegroundColor Cyan
-    $cfg = Get-Config
-    $cur = Find-Java
-    if ($cur) { Write-Host ('  当前: ' + $cur) } else { Write-Host '  当前: (无)' -ForegroundColor Yellow }
-    if ($cur) { Write-Host ('  版本: ' + (Get-JavaVersion $cur)) }
-    Write-Host ''
-    Write-Host '  1. 安装 Java 8'
-    Write-Host '  2. 安装 Java 17'
-    Write-Host '  3. 安装 Java 21'
-    Write-Host '  4. 手动指定 Java 路径'
-    Write-Host '  0. 返回'
-    $in = Read-Host '  > '
-    if ($in -in @('1','2','3')) {
-      $m = @{ '1' = 8; '2' = 17; '3' = 21 }[$in]
-      Install-Java $m
-      Pause-Any
-    } elseif ($in -eq '4') {
-      $p = Read-Host '  java.exe 路径'
-      if ($p -and (Test-Path -LiteralPath $p)) {
-        $cfg.JavaPath = $p
-        Save-Config $cfg
-        Write-Host '已保存' -ForegroundColor Green
-      } else { Write-Host '路径无效' -ForegroundColor Red }
-      Pause-Any
-    } elseif ($in -eq '0') { return }
-  }
-}
-
-function Show-Settings {
-  while ($true) {
-    Clear-Host
-    Write-Host '=== 设置 ===' -ForegroundColor Cyan
-    $cfg = Get-Config
-    $gd = $cfg.GameDir; if (-not $gd) { $gd = '(默认 .minecraft)' }
-    $ja = $cfg.JvmArgs; if (-not $ja) { $ja = '(无)' }
-    Write-Host ('  1. 玩家名      : ' + $cfg.PlayerName)
-    Write-Host ('  2. 内存 (MB)   : ' + $cfg.MemoryMB)
-    Write-Host ('  3. 窗口大小    : ' + $cfg.WindowWidth + ' x ' + $cfg.WindowHeight)
-    Write-Host ('  4. 额外 JVM 参数: ' + $ja)
-    Write-Host ('  5. 游戏目录    : ' + $gd)
-    Write-Host ('  6. 全屏启动    : ' + $(if ($cfg.Fullscreen) { '是' } else { '否' }))
-    Write-Host ('  7. 演示模式    : ' + $(if ($cfg.DemoMode) { '是' } else { '否' }))
-    $eg = $cfg.ExtraGameArgs; if (-not $eg) { $eg = '(无)' }
-    Write-Host ('  8. 额外游戏参数: ' + $eg)
-    Write-Host ('  9. 调试模式    : ' + $(if ($cfg.DebugMode) { '开（显示启动详情 + 输出写日志）' } else { '关' }))
-    Write-Host '  0. 返回'
-    $in = Read-Host '  > '
-    switch ($in) {
-      '1' { $n = Read-Host '  输入玩家名'; if ($n) { $cfg.PlayerName = $n; Save-Config $cfg } }
-      '2' {
-        $m = Read-Host '  输入内存 MB (512-32768)'
-        if ($m -match '^[0-9]+$' -and [int]$m -ge 512 -and [int]$m -le 32768) {
-          $cfg.MemoryMB = [int]$m; Save-Config $cfg; Write-Host '  已保存' -ForegroundColor Green
-        } else { Write-Host '  无效数值' -ForegroundColor Red }
-        Start-Sleep -Milliseconds 600
-      }
-      '3' {
-        $w = Read-Host '  输入宽度'
-        $h = Read-Host '  输入高度'
-        if ($w -match '^[0-9]+$' -and $h -match '^[0-9]+$') {
-          $cfg.WindowWidth = [int]$w; $cfg.WindowHeight = [int]$h; Save-Config $cfg; Write-Host '  已保存' -ForegroundColor Green
-        } else { Write-Host '  无效数值' -ForegroundColor Red }
-        Start-Sleep -Milliseconds 600
-      }
-      '4' { $j = Read-Host '  输入 JVM 参数 (空格分隔)'; $cfg.JvmArgs = $j; Save-Config $cfg }
-      '5' {
-        $g = Read-Host '  输入游戏目录 (留空使用默认)'
-        if (-not $g) { $cfg.GameDir = '' }
-        elseif (Test-Path -LiteralPath $g) { $cfg.GameDir = $g }
-        else { Write-Host '  目录不存在，已忽略' -ForegroundColor Red; Start-Sleep -Milliseconds 600; continue }
-        Save-Config $cfg
-      }
-      '6' { $cfg.Fullscreen = (-not $cfg.Fullscreen); Save-Config $cfg; Write-Host ('  全屏: ' + $(if ($cfg.Fullscreen) { '开' } else { '关' })) -ForegroundColor Green; Start-Sleep -Milliseconds 600 }
-      '7' { $cfg.DemoMode = (-not $cfg.DemoMode); Save-Config $cfg; Write-Host ('  演示模式: ' + $(if ($cfg.DemoMode) { '开' } else { '关' })) -ForegroundColor Green; Start-Sleep -Milliseconds 600 }
-      '8' { $e = Read-Host '  输入额外游戏参数 (空格分隔)'; $cfg.ExtraGameArgs = $e; Save-Config $cfg }
-      '9' {
-        $cfg.DebugMode = (-not $cfg.DebugMode); Save-Config $cfg
-        Write-Host ('  调试模式: ' + $(if ($cfg.DebugMode) { '开' } else { '关' })) -ForegroundColor Green
-        Start-Sleep -Milliseconds 600
-      }
-      '0' { return }
-    }
-  }
-}
-
 function Invoke-SelfTest($a) {
   $cmd = $a[0]
   switch ($cmd) {
@@ -1571,13 +1434,25 @@ function Test-McVersionId($s) {
   return ($s -match '^1\.\d+(\.\d+)?$')
 }
 
-# 从版本 id 推断 NeoForge 对应的 MC 版本（21.1.x -> 1.21.1，20.4.x -> 1.20.4）
+# NeoForge 版本号 ↔ MC 版本：21.1.x -> 1.21.1，21.0.x -> 1.21，47.1.x -> 1.20.1
 function ConvertFrom-NeoForgeVer($neoVer) {
   if ($neoVer -match '^(\d+)\.(\d+)\.') {
-    $a = $Matches[1]; $b = $Matches[2]
-    if ($b -eq '0') { return ('1.' + $a) }
+    $a = [int]$Matches[1]; $b = [int]$Matches[2]
+    if ($a -ge 47) { if ($a -eq 47 -and $b -eq 1) { return '1.20.1' }; return $null }
+    if ($b -eq 0) { return ('1.' + $a) }
     return ('1.' + $a + '.' + $b)
   }
+  return $null
+}
+
+# MC 版本 -> NeoForge 版本前缀（用于筛选可用版本）
+function Get-NeoForgePrefix($mc) {
+  if ($mc -match '^1\.(\d+)\.(\d+)$') {
+    $a = [int]$Matches[1]; $b = [int]$Matches[2]
+    if ($a -eq 20 -and $b -eq 1) { return '47.1.' }
+    return ($a.ToString() + '.' + $b + '.')
+  }
+  if ($mc -match '^1\.(\d+)$') { return ([int]$Matches[1]).ToString() + '.0.' }
   return $null
 }
 
@@ -1617,6 +1492,26 @@ function Get-McVersion($cfg) {
   return $null
 }
 
+# 该 MC 版本需要的 Java 主版本：优先读本地版本 JSON，否则按版本号推断
+function Get-JavaMajorForMc($mc) {
+  if (-not $mc) { return 17 }
+  $jp = Join-Path (Join-Path (Join-Path $script:McDir 'versions') $mc) ($mc + '.json')
+  if (Test-Path -LiteralPath $jp) {
+    try {
+      $j = Get-Content -LiteralPath $jp -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($j.javaVersion -and $j.javaVersion.majorVersion) { return [int]$j.javaVersion.majorVersion }
+    } catch {}
+  }
+  if ($mc -match '^1\.(\d+)(?:\.(\d+))?') {
+    $min = [int]$Matches[1]; $pat = 0
+    if ($Matches[2]) { $pat = [int]$Matches[2] }
+    if ($min -gt 20 -or ($min -eq 20 -and $pat -ge 5)) { return 21 }
+    if ($min -ge 17) { return 17 }
+    return 8
+  }
+  return 8
+}
+
 function Test-HasChinese($s) {
   return ($s -match '[一-鿿]')
 }
@@ -1624,131 +1519,10 @@ function Test-HasChinese($s) {
 function Search-Modrinth($q, $mcVer, $loader, $limit = 20) {
   $url = 'https://api.modrinth.com/v2/search?query=' + [uri]::EscapeDataString($q) + '&limit=' + $limit
   $url += '&facets=' + [uri]::EscapeDataString(('[["versions:' + $mcVer + '"],["categories:' + $loader + '"]]'))
-  return (Get-Json $url ('mod_search_' + [guid]::NewGuid().ToString('N') + '.json') 0)
-}
-
-# 麦块开放 API：内置中文翻译的 Mod 库，返回 Modrinth slug 便于直接安装
-# 文档：https://api.minekuai.cn  限流 600 次/分钟，无需 Key
-function Search-ModMinekuai($q, $mcVer, $loader, $limit = 20) {
-  $url = 'https://api.minekuai.cn/panel/public/mc-mods?q=' + [uri]::EscapeDataString($q)
-  $url += '&limit=' + $limit + '&status=translated'
-  if ($loader) { $url += '&loader%5B%5D=' + [uri]::EscapeDataString($loader) }
-  if ($mcVer) { $url += '&game_version%5B%5D=' + [uri]::EscapeDataString($mcVer) }
-
-  $resp = Get-Json $url $null 0
-  $hits = New-Object System.Collections.ArrayList
-  foreach ($it in @($resp.items)) {
-    if (-not $it.slug) { continue }
-    $zh = $it.title_zh
-    if ($zh -and $zh.Trim() -eq '') { $zh = $null }
-    $desc = $it.description_zh
-    if (-not $desc -or $desc.Trim() -eq '') { $desc = $it.description_en }
-    [void]$hits.Add([PSCustomObject]@{
-      slug = $it.slug
-      title = $it.title
-      title_zh = $zh
-      description = $desc
-      downloads = $it.downloads
-      loaders = @($it.loaders)
-      game_versions = @($it.game_versions)
-    })
-  }
-  return [PSCustomObject]@{ hits = @($hits); source = 'minekuai'; total = $resp.total }
-}
-
-# 综合搜索：优先麦块 API（内置中文翻译），失败或空结果时降级到 Modrinth 原生搜索
-function Search-ModCombined($q, $mcVer, $loader, $limit = 20) {
-  # 1) 麦块 API —— 支持中英文关键词，返回带中文标题的结果
-  try {
-    $r1 = Search-ModMinekuai $q $mcVer $loader $limit
-    if ($r1.hits.Count -gt 0) { return $r1 }
-    Write-Host '  麦块 API 无结果，改用 Modrinth 搜索...' -ForegroundColor DarkGray
-  } catch {
-    Write-Host ('  麦块 API 不可用（' + $_.Exception.Message + '），改用 Modrinth 搜索...') -ForegroundColor DarkGray
-  }
-
-  # 2) 降级：Modrinth 原生搜索（中文关键词效果较差）
-  $hits = New-Object System.Collections.ArrayList
-  try {
-    $r2 = Search-Modrinth $q $mcVer $loader $limit
-    foreach ($h in @($r2.hits)) {
-      [void]$hits.Add([PSCustomObject]@{
-        slug = $h.slug
-        title = $h.title
-        title_zh = $null
-        description = $h.description
-        downloads = $h.downloads
-        loaders = @($h.loaders)
-        game_versions = @($h.versions)
-      })
-    }
-  } catch {
-    throw
-  }
-  return [PSCustomObject]@{ hits = @($hits); source = 'modrinth' }
-}
-
-function Show-ModSearch {
-  $cfg = Get-Config
-  if (-not $cfg.SelectedVersion) { Write-Host '  请先在版本管理中选择一个版本' -ForegroundColor Yellow; Pause-Any; return }
-  if (-not $cfg.SelectedLoader -or $cfg.SelectedLoader -eq 'vanilla') {
-    Write-Host '  当前是原版，无法搜索 Mod。请先安装并切换到 Fabric / Forge / NeoForge 版本。' -ForegroundColor Yellow
-    Pause-Any; return
-  }
-  $loader = Get-LoaderName $cfg
-  $mcVer = Get-McVersion $cfg
-  if (-not $mcVer) {
-    Write-Host ('  无法从当前版本推断 Minecraft 版本: ' + $cfg.SelectedVersion) -ForegroundColor Red
-    Write-Host '  请在版本管理中选择一个标准版本后再试' -ForegroundColor Yellow
-    Pause-Any; return
-  }
-  $q = $null
-  $r = $null
-  while ($true) {
-    if ($null -eq $q) {
-      Clear-Host
-      Write-Host '=== Mod 搜索 (Modrinth) ===' -ForegroundColor Cyan
-      Write-Host ('  当前版本: ' + $cfg.SelectedVersion)
-      Write-Host ('  搜索条件: MC ' + $mcVer + ' / 加载器 ' + $loader) -ForegroundColor Green
-      Write-Host '  支持中英文关键词（如 "机械动力"、"合成表"、"sodium"）'
-      $q = Read-Host '  搜索关键词 (留空返回)'
-      if ([string]::IsNullOrWhiteSpace($q)) { return }
-      try { $r = Search-ModCombined $q $mcVer $loader 20 }
-      catch { Write-Host ('  搜索失败: ' + $_.Exception.Message) -ForegroundColor Red; Pause-Any; return }
-    }
-    if (-not $r.hits -or $r.hits.Count -eq 0) {
-      Write-Host '  没有结果，请换个关键词' -ForegroundColor Yellow
-      $q = $null; continue
-    }
-    Clear-Host
-    Write-Host ('=== 搜索结果: "' + $q + '"  (共 ' + $r.hits.Count + ' 条) ===') -ForegroundColor Cyan
-    if ($r.source) {
-      $srcTxt = if ($r.source -eq 'minekuai') { '麦块（中文）' } else { 'Modrinth' }
-      Write-Host ('  数据源: ' + $srcTxt) -ForegroundColor DarkGray
-    }
-    for ($i = 0; $i -lt $r.hits.Count; $i++) {
-      $hh = $r.hits[$i]
-      $dl = 0; if ($hh.downloads) { $dl = $hh.downloads }
-      $showTitle = if ($hh.title_zh) { $hh.title_zh } else { $hh.title }
-      Write-Host ('  ' + ($i + 1) + '. ' + $showTitle + '  [' + $hh.slug + ']  下载:' + $dl) -ForegroundColor White
-      if ($hh.title_zh -and $hh.title -and $hh.title_zh -ne $hh.title) {
-        Write-Host ('     ' + $hh.title) -ForegroundColor DarkGray
-      }
-      $desc = $hh.description; if ($desc -and $desc.Length -gt 74) { $desc = $desc.Substring(0,74) + '...' }
-      if ($desc) { Write-Host ('     ' + $desc) -ForegroundColor DarkGray }
-    }
-    Write-Host ''
-    Write-Host '  序号=下载安装   f关键词=重新搜索   0=返回'
-    $sel = Read-Host '  > '
-    if ($sel -eq '0' -or $sel -eq '') { return }
-    if ($sel -match '^[fF](.*)$') { $q = $Matches[1].Trim(); if (-not $q) { $q = $null }; $r = $null; continue }
-    if ($sel -notmatch '^[0-9]+$') { continue }
-    $idx = [int]$sel - 1
-    if ($idx -lt 0 -or $idx -ge $r.hits.Count) { continue }
-    $proj = $r.hits[$idx]
-    Install-ModFromProject $proj.slug $cfg
-    Pause-Any
-  }
+  # 同一查询缓存 10 分钟；缓存名用查询哈希，避免每次搜索都生成新的随机缓存文件
+  $md5 = [System.Security.Cryptography.MD5]::Create()
+  $key = [BitConverter]::ToString($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($url))).Replace('-','').ToLower()
+  return (Get-Json $url ('mod_search_' + $key + '.json') 10)
 }
 
 function Install-ModFromProject($slug, $cfg) {
@@ -1777,15 +1551,25 @@ function Install-ModFromProject($slug, $cfg) {
   if (-not $file) { $file = $v.files[0] }
   $modDir = Get-ModDir
   if (-not (Test-Path -LiteralPath $modDir)) { New-Item -ItemType Directory -Force -Path $modDir | Out-Null }
-  $dest = Join-Path $modDir $file.filename
-  Write-Host ('  下载 ' + $file.filename + ' ...') -ForegroundColor DarkGray
-  try { Download-File $file.url $dest $null $true; Write-Host '  安装完成' -ForegroundColor Green } catch { Write-Host ('  下载失败: ' + $_.Exception.Message) -ForegroundColor Red }
+  # 只取文件名，防止接口返回带路径的文件名
+  $fname = [IO.Path]::GetFileName([string]$file.filename)
+  if (-not $fname) { $fname = ([string]$slug + '.jar') }
+  $sha512 = $null
+  if ($file.hashes -and $file.hashes.sha512) { $sha512 = [string]$file.hashes.sha512 }
+  $dest = Join-Path $modDir $fname
+  Write-Host ('  下载 ' + $fname + ' ...') -ForegroundColor DarkGray
+  try { Download-File $file.url $dest $null $true $sha512; Write-Host '  安装完成' -ForegroundColor Green } catch { Write-Host ('  下载失败: ' + $_.Exception.Message) -ForegroundColor Red }
 }
 
 function Install-Fabric {
   $cfg = Get-Config
   if (-not $cfg.SelectedVersion) { Write-Host '  请先选择一个 Minecraft 版本' -ForegroundColor Yellow; Pause-Any; return }
-  $mc = $cfg.SelectedVersion
+  $mc = Get-McVersion $cfg
+  if (-not $mc) { $mc = $cfg.SelectedVersion }
+  if (-not (Test-McVersionId $mc)) {
+    Write-Host ('  无法从当前版本推断 Minecraft 版本（' + $cfg.SelectedVersion + '），请先切换到原版版本') -ForegroundColor Red
+    Pause-Any; return
+  }
   Write-Host ('  为 ' + $mc + ' 安装 Fabric...') -ForegroundColor Cyan
   $loaderMeta = $null
   try { $loaderMeta = Get-Json ('https://meta.fabricmc.net/v2/versions/loader/' + $mc) ('fabric_loaders_' + $mc + '.json') 30 } catch {
@@ -1808,8 +1592,9 @@ function Install-Fabric {
   $jar = Join-Path $script:CacheDir 'fabric-installer.jar'
   Write-Host ('  下载安装器 ' + $instVer + ' ...') -ForegroundColor DarkGray
   try { Download-File $jarUrl $jar $null $true } catch { Write-Host ('  下载失败: ' + $_.Exception.Message) -ForegroundColor Red; Pause-Any; return }
-  $java = Find-Java
-  if (-not $java) { Write-Host '  未找到 Java，先安装 Java 17' -ForegroundColor Yellow; Install-Java 17; $java = Find-Java }
+  $needJ = Get-JavaMajorForMc $mc
+  $java = Find-JavaFor $needJ
+  if (-not $java) { Write-Host ('  未找到 Java ' + $needJ + '，先安装') -ForegroundColor Yellow; Install-Java $needJ; $java = Find-JavaFor $needJ }
   if (-not $java) { Write-Host '  Java 不可用' -ForegroundColor Red; Pause-Any; return }
   Write-Host '  正在安装 Fabric (可能需要一点时间)...' -ForegroundColor DarkGray
   Push-Location $script:McDir
@@ -1827,7 +1612,12 @@ function Install-Fabric {
 function Install-Forge {
   $cfg = Get-Config
   if (-not $cfg.SelectedVersion) { Write-Host '  请先选择一个 Minecraft 版本' -ForegroundColor Yellow; Pause-Any; return }
-  $mc = $cfg.SelectedVersion
+  $mc = Get-McVersion $cfg
+  if (-not $mc) { $mc = $cfg.SelectedVersion }
+  if (-not (Test-McVersionId $mc)) {
+    Write-Host ('  无法从当前版本推断 Minecraft 版本（' + $cfg.SelectedVersion + '），请先切换到原版版本') -ForegroundColor Red
+    Pause-Any; return
+  }
   Write-Host ('  为 ' + $mc + ' 安装 Forge...') -ForegroundColor Cyan
   $promos = $null
   try { $promos = Get-Json 'https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json' 'forge_promos.json' 30 } catch { Write-Host ('  获取 Forge 版本失败: ' + $_.Exception.Message) -ForegroundColor Red; Pause-Any; return }
@@ -1849,8 +1639,9 @@ function Install-Forge {
     try { Download-File $u $jar $null $true; $ok = $true; break } catch { Write-Host '  失败，尝试备用地址' -ForegroundColor Yellow }
   }
   if (-not $ok) { Write-Host '  下载 Forge 安装器失败' -ForegroundColor Red; Pause-Any; return }
-  $java = Find-Java
-  if (-not $java) { Write-Host '  未找到 Java，先安装 Java 8' -ForegroundColor Yellow; Install-Java 8; $java = Find-Java }
+  $needJ = Get-JavaMajorForMc $mc
+  $java = Find-JavaFor $needJ
+  if (-not $java) { Write-Host ('  未找到 Java ' + $needJ + '，先安装') -ForegroundColor Yellow; Install-Java $needJ; $java = Find-JavaFor $needJ }
   if (-not $java) { Write-Host '  Java 不可用' -ForegroundColor Red; Pause-Any; return }
   Write-Host '  正在安装 Forge (可能需要几分钟)...' -ForegroundColor DarkGray
   & $java -jar $jar --installClient $script:McDir
@@ -1916,10 +1707,11 @@ function Install-NeoForge {
   $cfg = Get-Config
   if (-not $cfg.SelectedVersion) { Write-Host '  请先选择一个 Minecraft 版本' -ForegroundColor Yellow; Pause-Any; return }
   $ver = $cfg.SelectedVersion
-  # 从版本 id 或已装配置中取 MC 版本；整合包场景通常已设置 SelectedLoaderVersion
-  $mc = $ver
+  # 从版本 id 或已装版本 JSON 推断 MC 版本（含 neoforge-* / fabric-* / *-forge-*）
+  $mc = Get-McVersion $cfg
+  if (-not $mc) { $mc = $ver }
   $neoVer = ''
-  if ($ver -match '^neoforge-(.+)$') { $neoVer = $Matches[1]; $mc = $cfg.MinecraftVersion }
+  if ($ver -match '^neoforge-(.+)$') { $neoVer = $Matches[1] }
   if (-not $mc -or $mc -notmatch '^\d+\.\d+(\.\d+)?$') {
     if ($script:NonInteractive) { Write-Host ('  无法从版本 id 推断 MC 版本: ' + $ver) -ForegroundColor Red; Pause-Any; return }
     $mc = Read-Host '  请输入对应的 Minecraft 版本（如 1.21.1）'
@@ -1927,26 +1719,38 @@ function Install-NeoForge {
   if (-not $neoVer -and $cfg.SelectedLoader -eq 'neoforge' -and $cfg.SelectedLoaderVersion) { $neoVer = $cfg.SelectedLoaderVersion }
   Write-Host ('  目标: MC ' + $mc + ($(if ($neoVer) { '  NeoForge ' + $neoVer } else { '  NeoForge (自动选版)' }))) -ForegroundColor Cyan
   if (-not $neoVer) {
-    $metaUrl = 'https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml'
+    # 官方 maven 优先，镜像兜底
+    $metaUrls = @(
+      'https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml',
+      'https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml'
+    )
     $tmp = Join-Path $script:CacheDir 'neoforge_meta.xml'
     $mok = $false
-    foreach ($u in (Get-UrlWithMirror $metaUrl)) {
-      & curl.exe -s -L --ssl-no-revoke -m 20 -o $tmp $u
+    foreach ($mu in $metaUrls) {
+      & curl.exe -s -f -L --ssl-no-revoke -m 20 -o $tmp $mu
       if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $tmp) -and (Get-Item $tmp).Length -gt 0) { $mok = $true; break }
+      Write-Host '  元数据源不可用，尝试下一个' -ForegroundColor DarkGray
     }
     if ($mok) {
       $txt = [IO.File]::ReadAllText($tmp)
       Remove-Item $tmp -Force -EA SilentlyContinue
       $m = [regex]::Matches($txt, '<version>([0-9]+\.[0-9]+\.[0-9]+)</version>')
+      $prefix = Get-NeoForgePrefix $mc
       $cands = @()
-      if ($mc -match '^1\.(\d+)\.(\d+)$') {
-        $mm = $Matches[1]; $pp = $Matches[2]
-        foreach ($x in $m) { $vn = $x.Groups[1].Value; if ($vn -match ('^' + $mm + '\.' + $pp + '\.')) { $cands += $vn } }
+      foreach ($x in $m) {
+        $vn = $x.Groups[1].Value
+        if (-not $prefix -or $vn.StartsWith($prefix)) { $cands += $vn }
       }
-      if ($cands.Count -eq 0) { foreach ($x in $m) { $cands += $x.Groups[1].Value } }
       if ($cands.Count -gt 0) {
-        $neoVer = $cands[$cands.Count - 1]
-        Write-Host ('  自动选择 NeoForge: ' + $neoVer) -ForegroundColor DarkGray
+        # 按数字段取最大值，避免字符串序把 21.1.9 排到 21.1.264 之后
+        $best = $null; $bestKey = -1
+        foreach ($c in $cands) {
+          $p = $c -split '\.'
+          $k = [int64]$p[0] * 1000000 + [int64]$p[1] * 1000 + [int64]$p[2]
+          if ($k -gt $bestKey) { $bestKey = $k; $best = $c }
+        }
+        $neoVer = $best
+        Write-Host ('  自动选择 NeoForge: ' + $neoVer + '（对应 MC ' + $mc + '）') -ForegroundColor DarkGray
       }
     }
   }
@@ -1956,16 +1760,17 @@ function Install-NeoForge {
     $neoVer = Read-Host '  NeoForge 版本 (如 21.1.262)'
   }
   if (-not $neoVer) { Pause-Any; return }
-  $instUrl = 'https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/' + $neoVer + '/neoforge-' + $neoVer + '-installer.jar'
+  $rel = 'net/neoforged/neoforge/' + $neoVer + '/neoforge-' + $neoVer + '-installer.jar'
   $jar = Join-Path $script:CacheDir 'neoforge-installer.jar'
   Write-Host ('  下载 NeoForge 安装器 ' + $neoVer + ' ...') -ForegroundColor DarkGray
   $ok = $false
-  foreach ($u in (Get-UrlWithMirror $instUrl)) {
-    try { Download-File $u $jar $null $true; $ok = $true; break } catch {}
+  foreach ($u in @(('https://maven.neoforged.net/releases/' + $rel), ('https://bmclapi2.bangbang93.com/maven/' + $rel))) {
+    try { Download-File $u $jar $null $true; $ok = $true; break } catch { Write-Host '  该源不可用，尝试下一个' -ForegroundColor Yellow }
   }
   if (-not $ok) { Write-Host '  下载 NeoForge 安装器失败' -ForegroundColor Red; Pause-Any; return }
-  $java = Find-JavaFor 21
-  if (-not $java) { Write-Host '  安装 NeoForge 需要 Java 21' -ForegroundColor Yellow; Install-Java 21; $java = Find-JavaFor 21 }
+  $needJ = Get-JavaMajorForMc $mc
+  $java = Find-JavaFor $needJ
+  if (-not $java) { Write-Host ('  安装 NeoForge 需要 Java ' + $needJ) -ForegroundColor Yellow; Install-Java $needJ; $java = Find-JavaFor $needJ }
   if (-not $java) { Write-Host '  Java 不可用' -ForegroundColor Red; Pause-Any; return }
   # 预置依赖库（经镜像），避免安装器逐个访问不可达源
   try { Prefetch-NeoForgeLibs $jar } catch { Write-Host ('  预置依赖失败: ' + $_.Exception.Message) -ForegroundColor DarkGray }
@@ -1981,135 +1786,6 @@ function Install-NeoForge {
   Pause-Any
 }
 
-function Show-LoaderMenu {
-  while ($true) {
-    Clear-Host
-    Write-Host '=== 安装 Mod 加载器 ===' -ForegroundColor Cyan
-    $cfg = Get-Config
-    $v = $cfg.SelectedVersion; if (-not $v) { $v = '(未选择)' }
-    Write-Host ('  当前版本: ' + $v)
-    Write-Host ''
-    Write-Host '  1. 安装 Fabric（前台）'
-    Write-Host '  2. 安装 Forge（前台）'
-    Write-Host '  3. 安装 NeoForge（前台）'
-    Write-Host '  4. 安装 Fabric（后台）'
-    Write-Host '  5. 安装 Forge（后台）'
-    Write-Host '  6. 安装 NeoForge（后台）'
-    Write-Host '  0. 返回'
-    $in = Read-Host '  > '
-    switch ($in) {
-      '1' { Install-Fabric }
-      '2' { Install-Forge }
-      '3' { Install-NeoForge }
-      '4' {
-        if (-not $cfg.SelectedVersion) { Write-Host '  请先选择一个 Minecraft 版本' -ForegroundColor Yellow; Pause-Any }
-        else { Start-BackgroundTask ('安装 Fabric (' + $cfg.SelectedVersion + ')') 'fabricinstall'; Pause-Any }
-      }
-      '5' {
-        if (-not $cfg.SelectedVersion) { Write-Host '  请先选择一个 Minecraft 版本' -ForegroundColor Yellow; Pause-Any }
-        else { Start-BackgroundTask ('安装 Forge (' + $cfg.SelectedVersion + ')') 'forgeinstall'; Pause-Any }
-      }
-      '6' {
-        if (-not $cfg.SelectedVersion) { Write-Host '  请先选择一个 Minecraft 版本' -ForegroundColor Yellow; Pause-Any }
-        else { Start-BackgroundTask ('安装 NeoForge (' + $cfg.SelectedVersion + ')') 'neoforgeinstall'; Pause-Any }
-      }
-      '0' { return }
-    }
-  }
-}
-
-function Show-ModMenu {
-  # 原版不支持 Mod，进入前统一拦截
-  $pre = Get-Config
-  if (-not $pre.SelectedLoader -or $pre.SelectedLoader -eq 'vanilla') {
-    Clear-Host
-    Write-Host '=== Mod 管理 ===' -ForegroundColor Cyan
-    Write-Host ''
-    Write-Host '  当前是原版（vanilla），无法加载 Mod。' -ForegroundColor Yellow
-    Write-Host '  请先在「5. 安装 Mod 加载器」安装 Fabric / Forge / NeoForge，' -ForegroundColor Yellow
-    Write-Host '  然后在「2. 版本管理」中切换到对应加载器版本。' -ForegroundColor Yellow
-    Pause-Any
-    return
-  }
-  while ($true) {
-    Clear-Host
-    Write-Host '=== Mod 管理 ===' -ForegroundColor Cyan
-    $cfg = Get-Config
-    $v = $cfg.SelectedVersion; if (-not $v) { $v = '(未选择)' }
-    $loader = Get-LoaderName $cfg
-    $mcv = Get-McVersion $cfg
-    if (-not $mcv) { $mcv = '(未知)' }
-    Write-Host ('  目标: 版本 ' + $v)
-    Write-Host ('        MC ' + $mcv + ' / 加载器 ' + $loader)
-    Write-Host ''
-    Write-Host '  1. 搜索并下载 Mod (Modrinth)'
-    Write-Host '  2. 本地 Mod 管理 (启用/禁用/删除)'
-    Write-Host '  0. 返回'
-    $in = Read-Host '  > '
-    switch ($in) {
-      '1' { Show-ModSearch }
-      '2' { Show-LocalMods }
-      '0' { return }
-    }
-  }
-}
-
-function Show-LocalMods {
-  $modDir = Get-ModDir
-  if (-not (Test-Path -LiteralPath $modDir)) { New-Item -ItemType Directory -Force -Path $modDir | Out-Null }
-  $filter = ''
-  while ($true) {
-    $all = @(Get-ChildItem -LiteralPath $modDir -File -ErrorAction SilentlyContinue | Sort-Object Name)
-    $files = $all
-    if ($filter) { $files = @($all | Where-Object { $_.Name -like ('*' + $filter + '*') }) }
-    Clear-Host
-    Write-Host '=== 本地 Mod ===' -ForegroundColor Cyan
-    if ($filter) { Write-Host ('  筛选: "' + $filter + '"  匹配 ' + $files.Count + '/' + $all.Count) -ForegroundColor DarkGray }
-    if ($files.Count -eq 0) {
-      if ($all.Count -eq 0) { Write-Host '  (mods 目录为空)' -ForegroundColor Yellow }
-      else { Write-Host '  (无匹配项)' -ForegroundColor Yellow }
-    } else {
-      for ($i = 0; $i -lt $files.Count; $i++) {
-        $f = $files[$i]
-        $state = '[启用]'
-        $name = $f.Name
-        if ($name.ToLower().EndsWith('.disabled')) { $state = '[禁用]'; $name = $name.Substring(0, $name.Length - 9) }
-        Write-Host ('  ' + ($i + 1) + '. ' + $state + ' ' + $name)
-      }
-    }
-    Write-Host ''
-    Write-Host '  f关键词=模糊筛选(留空清除)  e序号=启用  d序号=禁用/删除  q=返回'
-    $in = Read-Host '  > '
-    if ($in -eq 'q') { return }
-    if ($in -eq '' -or $in -eq $null) { continue }
-    if ($in -match '^[fF](.*)$') {
-      $filter = $Matches[1].Trim()
-      continue
-    }
-    if ($in -match '^[edE]([0-9]+)$') {
-      $op = $in.Substring(0,1).ToLower()
-      $idx = [int]$Matches[1] - 1
-      if ($idx -ge 0 -and $idx -lt $files.Count) {
-        $f = $files[$idx]
-        $full = $f.FullName
-        if ($op -eq 'e') {
-          if ($f.Name.ToLower().EndsWith('.disabled')) {
-            $newname = $f.Name.Substring(0, $f.Name.Length - 9)
-            Rename-Item -LiteralPath $full -NewName $newname -ErrorAction SilentlyContinue
-          }
-        } else {
-          if ($f.Name.ToLower().EndsWith('.disabled')) {
-            $ans = Read-Host ('  确认删除 ' + $f.Name + ' ? (y/N)')
-            if ($ans -match '^[Yy]') { Remove-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue }
-          } else {
-            Rename-Item -LiteralPath $full -NewName ($f.Name + '.disabled') -ErrorAction SilentlyContinue
-          }
-        }
-      }
-    }
-  }
-}
-
 # ================= 后台下载任务 =================
 $script:BgTaskFile = Join-Path $script:CclDir 'bg_task.json'
 
@@ -2119,10 +1795,13 @@ function Start-BackgroundTask($label, $testCmd) {
   $logPath = Join-Path $script:CacheDir 'bg_task.log'
   if (Test-Path -LiteralPath $logPath) { Remove-Item -LiteralPath $logPath -Force -EA SilentlyContinue }
   $bat = $script:LauncherPath
-  $args = '/c ""' + $bat + '" --test ' + $testCmd + ' > "' + $logPath + '" 2>&1"'
-  $p = Start-Process -FilePath 'cmd.exe' -ArgumentList $args -PassThru -WindowStyle Hidden
+  $cmdLine = '/c ""' + $bat + '" --test ' + $testCmd + ' > "' + $logPath + '" 2>&1"'
+  $p = Start-Process -FilePath 'cmd.exe' -ArgumentList $cmdLine -PassThru -WindowStyle Hidden
+  $ticks = 0
+  try { $ticks = $p.StartTime.Ticks } catch {}
   $state = [ordered]@{
     Pid = $p.Id; Label = $label; LogPath = $logPath; StartTime = (Get-Date).ToString('s')
+    StartTicks = $ticks
   }
   $state | ConvertTo-Json | Set-Content -LiteralPath $script:BgTaskFile -Encoding UTF8
   Write-Host ('  已在后台开始：' + $label + '（PID ' + $p.Id + '），可继续其他操作。') -ForegroundColor Green
@@ -2139,7 +1818,13 @@ function Get-BackgroundTask {
 
 function Test-BackgroundTaskRunning($task) {
   if (-not $task) { return $false }
-  return ($null -ne (Get-Process -Id $task.Pid -ErrorAction SilentlyContinue))
+  $p = Get-Process -Id $task.Pid -ErrorAction SilentlyContinue
+  if (-not $p) { return $false }
+  # PID 可能被系统复用，用启动时间做二次校验
+  if ($task.StartTicks) {
+    try { if ($p.StartTime.Ticks -ne [int64]$task.StartTicks) { return $false } } catch {}
+  }
+  return $true
 }
 
 function Show-BackgroundStatus($brief = $false) {
@@ -2148,13 +1833,13 @@ function Show-BackgroundStatus($brief = $false) {
   $running = Test-BackgroundTaskRunning $task
   $lastLine = ''
   $pct = -1
-  if (Test-Path -LiteralPath $task.LogPath) {
+  if ($task.LogPath -and (Test-Path -LiteralPath $task.LogPath)) {
     try {
       $lines = Get-Content -LiteralPath $task.LogPath -Tail 30 -EA SilentlyContinue
       $last = $lines | Where-Object { $_ -match '%|下载|完成|失败|错误' } | Select-Object -Last 1
       if ($last) { $lastLine = ($last -replace '[\r]', '').Trim() }
-      $m = [regex]::Match(($lines -join ' '), '(\d{1,3})%')
-      if ($m.Success) { $pct = [int]$m.Groups[1].Value }
+      $ms = [regex]::Matches(($lines -join ' '), '(\d{1,3})%')
+      if ($ms.Count -gt 0) { $pct = [int]$ms[$ms.Count - 1].Groups[1].Value }
     } catch {}
   }
   $status = if ($running) { '进行中' } else { '已结束' }
@@ -2177,8 +1862,15 @@ function Show-BackgroundStatus($brief = $false) {
 
 function Get-InstanceDir($name) {
   $safe = ($name -replace '[\\/:*?"<>|]', '_').Trim()
-  if (-not $safe) { $safe = 'instance' }
-  return (Join-Path (Join-Path $script:McDir 'instances') $safe)
+  $safe = $safe.TrimEnd('.')
+  if (-not $safe -or $safe -eq '.' -or $safe -eq '..') { $safe = 'instance' }
+  if ($safe -match '^(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') { $safe = '_' + $safe }
+  $root = Join-Path $script:McDir 'instances'
+  $rootFull = [IO.Path]::GetFullPath($root).TrimEnd($script:Sep)
+  $full = [IO.Path]::GetFullPath((Join-Path $rootFull $safe))
+  # 兜底：最终路径必须仍在 instances 目录内
+  if (-not $full.StartsWith($rootFull + $script:Sep, [StringComparison]::OrdinalIgnoreCase)) { $full = Join-Path $rootFull 'instance' }
+  return $full
 }
 
 function Import-Mrpack($zipPath) {
@@ -2193,7 +1885,7 @@ function Import-Mrpack($zipPath) {
   $idxPath = Join-Path $tmp 'modrinth.index.json'
   if (-not (Test-Path -LiteralPath $idxPath)) { Write-Host '  不是有效的 Modrinth 整合包 (缺少 modrinth.index.json)' -ForegroundColor Red; Remove-Item -LiteralPath $tmp -Recurse -Force -EA SilentlyContinue; return }
   $idx = $null
-  try { $idx = Get-Content -LiteralPath $idxPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Write-Host '  解析 modrinth.index.json 失败' -ForegroundColor Red; return }
+  try { $idx = Get-Content -LiteralPath $idxPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Write-Host '  解析 modrinth.index.json 失败' -ForegroundColor Red; Remove-Item -LiteralPath $tmp -Recurse -Force -EA SilentlyContinue; return }
   $packName = $idx.name; if (-not $packName) { $packName = 'imported-pack' }
   $instDir = Get-InstanceDir $packName
   if (Test-Path -LiteralPath $instDir) {
@@ -2220,15 +1912,21 @@ function Import-Mrpack($zipPath) {
   $clientFiles = @($files | Where-Object { -not ($_.env -and $_.env.client -eq 'unsupported') })
   Write-Host ('  下载整合包文件 (' + $clientFiles.Count + ') ...') -ForegroundColor DarkGray
   $dlItems = New-Object System.Collections.ArrayList
+  $instFull = [IO.Path]::GetFullPath($instDir).TrimEnd($script:Sep)
+  $skipped = 0
   foreach ($f in $clientFiles) {
-    $rel = $f.path -replace '/', $script:Sep
-    $dest = Join-Path $instDir $rel
+    $rel = ([string]$f.path) -replace '/', $script:Sep
+    if (-not $rel -or $rel -match '^[\\/]' -or $rel -match '^[A-Za-z]:') { $skipped++; continue }
+    $dest = [IO.Path]::GetFullPath((Join-Path $instFull $rel))
+    # 拒绝越出实例目录的路径（防 zip-slip 式写入）
+    if (-not $dest.StartsWith($instFull + $script:Sep, [StringComparison]::OrdinalIgnoreCase)) { $skipped++; continue }
     $sha1 = $null
     if ($f.hashes -and $f.hashes.sha1) { $sha1 = $f.hashes.sha1 }
     $url = $null
     if ($f.downloads -and $f.downloads.Count -gt 0) { $url = $f.downloads[0] }
     if ($url) { [void]$dlItems.Add(@{ Url = $url; Dest = $dest; Sha1 = $sha1 }) }
   }
+  if ($skipped -gt 0) { Write-Host ('  已跳过 ' + $skipped + ' 个越界或非法路径') -ForegroundColor Yellow }
   if ($dlItems.Count -gt 0) { [void](Download-Pool $dlItems (Get-DlThreads) '整合包文件') }
 
   $ov = Join-Path $tmp 'overrides'
@@ -2259,10 +1957,16 @@ function Import-Mrpack($zipPath) {
   elseif ($mcVer) { $fullId = $mcVer }
   $verExists = $false
   if ($fullId) { $verExists = Test-Path -LiteralPath (Join-Path (Join-Path $script:McDir 'versions') $fullId) }
-  if ($fullId -and $verExists) { $cfg.SelectedVersion = $fullId }
-  elseif ($mcVer) { $cfg.SelectedVersion = $mcVer }
-  $cfg.SelectedLoader = $loader
-  $cfg.SelectedLoaderVersion = $loaderVer
+  if ($fullId -and $verExists) {
+    $cfg.SelectedVersion = $fullId
+    $cfg.SelectedLoader = $loader
+    $cfg.SelectedLoaderVersion = $loaderVer
+  } else {
+    # 加载器版本尚未安装：先保持原版状态，避免“加载器=xxx 但启动的是原版”的错位
+    if ($mcVer) { $cfg.SelectedVersion = $mcVer }
+    $cfg.SelectedLoader = 'vanilla'
+    $cfg.SelectedLoaderVersion = ''
+  }
   Save-Config $cfg
   Write-Host '  已切换到该实例的游戏目录。' -ForegroundColor Green
 
@@ -2278,45 +1982,523 @@ function Import-Mrpack($zipPath) {
   if (-not $script:NonInteractive) { Pause-Any }
 }
 
+# ================= 统一键盘菜单层（方向键 + Enter） =================
+
+function Pause-Any {
+  if ($script:NonInteractive) { return }
+  Write-Host ''
+  Write-Host '  按 Enter 继续...' -ForegroundColor DarkGray
+  try { [void][Console]::ReadKey($true) } catch { [void](Read-Host) }
+}
+
+function Read-YesNo($prompt) {
+  Write-Host ('  ' + $prompt + '  (Y/N)') -ForegroundColor Yellow
+  try {
+    while ($true) {
+      $k = [Console]::ReadKey($true)
+      if ([string]$k.Key -eq 'Enter') { return $false }
+      if ([string]$k.KeyChar -match '^[Yy]$') { return $true }
+      if ([string]$k.KeyChar -match '^[Nn]$') { return $false }
+    }
+  } catch {
+    $a = Read-Host
+    return ($a -match '^[Yy]')
+  }
+}
+
+# 通用选择菜单：返回 @{ Index=序号; Key=Enter/Number/字母/Escape }
+function Show-Menu {
+  param($Title, $Header = @(), $Items = @(), $Footer = '↑↓ 选择   Enter 确认   Esc 返回', $Start = 0, $PageSize = 14, $Keys = '')
+  if (-not $Items -or $Items.Count -eq 0) { return @{ Index = -1; Key = 'Empty' } }
+  $sel = [int]$Start
+  if ($sel -lt 0 -or $sel -ge $Items.Count) { $sel = 0 }
+  $top = 0
+  while ($true) {
+    if ($sel -lt $top) { $top = $sel }
+    if ($sel -ge $top + $PageSize) { $top = $sel - $PageSize + 1 }
+    Clear-Host
+    if ($Title) { Write-Host $Title -ForegroundColor Cyan; Write-Host '' }
+    if ($Header -and $Header.Count -gt 0) {
+      foreach ($h in @($Header)) { Write-Host $h }
+      Write-Host ''
+    }
+    $last = [Math]::Min($Items.Count - 1, $top + $PageSize - 1)
+    for ($i = $top; $i -le $last; $i++) {
+      $txt = [string]$Items[$i]
+      if ($i -eq $sel) { Write-Host ('  > ' + $txt) -ForegroundColor Black -BackgroundColor Cyan }
+      else { Write-Host ('    ' + $txt) }
+    }
+    if ($Items.Count -gt $PageSize) {
+      $pg = [int][Math]::Floor($top / $PageSize) + 1
+      $tp = [int][Math]::Ceiling($Items.Count / $PageSize)
+      Write-Host ''
+      Write-Host ('  第 ' + $pg + '/' + $tp + ' 页（共 ' + $Items.Count + ' 项）') -ForegroundColor DarkGray
+    }
+    Write-Host ''
+    Write-Host ('  ' + $Footer) -ForegroundColor DarkGray
+    $k = $null
+    try { $k = [Console]::ReadKey($true) } catch { $k = $null }
+    if (-not $k) {
+      # 非交互环境降级为序号输入
+      $line = Read-Host '  输入序号（回车取消）'
+      if ($line -eq '0' -or -not $line) { return @{ Index = -1; Key = 'Escape' } }
+      if ($line -match '^\d+$') {
+        $n = [int]$line - 1
+        if ($n -ge 0 -and $n -lt $Items.Count) { return @{ Index = $n; Key = 'Number' } }
+      }
+      return @{ Index = -1; Key = 'Escape' }
+    }
+    switch ([string]$k.Key) {
+      'UpArrow'    { if ($sel -gt 0) { $sel-- } else { $sel = $Items.Count - 1 } }
+      'DownArrow'  { if ($sel -lt $Items.Count - 1) { $sel++ } else { $sel = 0 } }
+      'PageUp'     { $sel = [Math]::Max(0, $sel - $PageSize) }
+      'PageDown'   { $sel = [Math]::Min($Items.Count - 1, $sel + $PageSize) }
+      'Home'       { $sel = 0 }
+      'End'        { $sel = $Items.Count - 1 }
+      'Enter'      { return @{ Index = $sel; Key = 'Enter' } }
+      'Escape'     { return @{ Index = -1; Key = 'Escape' } }
+      'LeftArrow'  { $sel = [Math]::Max(0, $sel - $PageSize) }
+      'RightArrow' { $sel = [Math]::Min($Items.Count - 1, $sel + $PageSize) }
+      default {
+        $ch = [string]$k.KeyChar
+        if ($ch -eq '0') { return @{ Index = -1; Key = 'Escape' } }
+        if ($ch -match '^[0-9]$') {
+          $n = [int]$ch - 1
+          if ($n -ge 0 -and $n -lt $Items.Count) { return @{ Index = $n; Key = 'Number' } }
+        } elseif ($ch -match '^[A-Za-z]$') {
+          $u = $ch.ToUpper()
+          if ($u -eq 'Q') { return @{ Index = -1; Key = 'Escape' } }
+          if ($Keys -and $Keys.ToUpper().Contains($u)) { return @{ Index = $sel; Key = $u } }
+        }
+      }
+    }
+  }
+}
+
+# ================= 中文 Mod 搜索（多源合并 + 兜底） =================
+
+function Normalize-ModQuery($q) {
+  if (-not $q) { return '' }
+  $s = [string]$q
+  $s = $s -replace [string][char]0x3000, ' '
+  $s = $s.Trim().Trim('"').Trim("'").Trim()
+  $s = $s -replace '\s+', ' '
+  return $s
+}
+
+# 常见中文名 -> 英文关键词，麦块不可用/无结果时仍能搜到
+function ConvertTo-EnglishQuery($q) {
+  $map = @{
+    '机械动力' = 'create'; '合成表' = 'jei'; '物品管理器' = 'jei'; '钠' = 'sodium';
+    '苹果皮' = 'apple skin'; '小地图' = 'xaero minimap'; '旅行地图' = 'journeymap';
+    '光影前置' = 'iris'; '光影' = 'shaders'; '暮色森林' = 'twilight forest';
+    '植物魔法' = 'botania'; '匠魂' = 'tinkers construct'; '拔刀剑' = 'slashblade';
+    '等价交换' = 'projecte'; '无尽' = 'avaritia'; '工业' = 'industrial craft';
+    '家具' = 'furniture'; '背包' = 'backpack'; '储物' = 'storage'; '农业' = 'farming';
+    '附魔' = 'enchant'; '任务' = 'quest'; '优化' = 'optimize'; '性能' = 'performance'
+  }
+  $s = [string]$q
+  foreach ($k in $map.Keys) { if ($s.Contains($k)) { $s = $s.Replace($k, ' ' + $map[$k] + ' ') } }
+  $s = $s -replace '[一-鿿]', ' '
+  $s = ($s -replace '\s+', ' ').Trim()
+  if (-not $s) { return $null }
+  return $s
+}
+
+function Search-ModMinekuai($q, $mcVer, $loader, $limit = 20) {
+  $base = 'https://api.minekuai.cn/panel/public/mc-mods?q=' + [uri]::EscapeDataString($q) + '&limit=' + $limit
+  if ($loader) { $base += '&loader%5B%5D=' + [uri]::EscapeDataString($loader) }
+  if ($mcVer) { $base += '&game_version%5B%5D=' + [uri]::EscapeDataString($mcVer) }
+  $resp = $null
+  foreach ($extra in @('&status=translated', '')) {
+    try { $resp = Get-Json ($base + $extra) $null 0 } catch { $resp = $null }
+    if ($resp) { break }
+  }
+  if (-not $resp) { throw '麦块 API 不可用' }
+  $arr = @()
+  if ($resp.items) { $arr = @($resp.items) }
+  elseif ($resp.data) { $arr = @($resp.data) }
+  elseif ($resp.hits) { $arr = @($resp.hits) }
+  $hits = New-Object System.Collections.ArrayList
+  foreach ($it in $arr) {
+    if (-not $it) { continue }
+    $slug = $it.slug
+    if (-not $slug -and $it.project_id) { $slug = [string]$it.project_id }
+    if (-not $slug) { continue }
+    $zh = $it.title_zh
+    if (-not $zh -and $it.title_cn) { $zh = $it.title_cn }
+    if ($zh -and ([string]$zh).Trim() -eq '') { $zh = $null }
+    $desc = $it.description_zh
+    if (-not $desc -or ([string]$desc).Trim() -eq '') { $desc = $it.description_en }
+    if (-not $desc) { $desc = $it.description }
+    [void]$hits.Add([PSCustomObject]@{
+      slug = [string]$slug
+      title = [string]$it.title
+      title_zh = $zh
+      description = $desc
+      downloads = $it.downloads
+      loaders = @($it.loaders)
+      game_versions = @($it.game_versions)
+    })
+  }
+  return [PSCustomObject]@{ hits = @($hits); source = 'minekuai'; total = $resp.total }
+}
+
+function Search-ModCombined($q, $mcVer, $loader, $limit = 20) {
+  $q = Normalize-ModQuery $q
+  if (-not $q) { return [PSCustomObject]@{ hits = @(); source = 'none'; total = 0 } }
+  $all = New-Object System.Collections.ArrayList
+  $seen = @{}
+  $sources = New-Object System.Collections.ArrayList
+  $err = @()
+
+  try {
+    $r1 = Search-ModMinekuai $q $mcVer $loader $limit
+    foreach ($h in @($r1.hits)) {
+      $key = ([string]$h.slug).ToLower()
+      if (-not $key -or $seen.ContainsKey($key)) { continue }
+      $seen[$key] = $true
+      [void]$all.Add($h)
+    }
+    if ($all.Count -gt 0) { [void]$sources.Add('麦块') }
+  } catch { $err += $_.Exception.Message }
+
+  if ($all.Count -lt $limit) {
+    try {
+      $r2 = Search-Modrinth $q $mcVer $loader $limit
+      foreach ($h in @($r2.hits)) {
+        $key = ([string]$h.slug).ToLower()
+        if (-not $key -or $seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        [void]$all.Add([PSCustomObject]@{
+          slug = [string]$h.slug; title = [string]$h.title; title_zh = $null
+          description = $h.description; downloads = $h.downloads
+          loaders = @($h.loaders); game_versions = @($h.versions)
+        })
+      }
+      if ($r2.hits -and @($r2.hits).Count -gt 0) { [void]$sources.Add('Modrinth') }
+    } catch { $err += $_.Exception.Message }
+  }
+
+  # 中文查询仍无结果：翻译成英文再试一次
+  if ($all.Count -eq 0 -and (Test-HasChinese $q)) {
+    $en = ConvertTo-EnglishQuery $q
+    if ($en) {
+      try {
+        $r3 = Search-Modrinth $en $mcVer $loader $limit
+        foreach ($h in @($r3.hits)) {
+          $key = ([string]$h.slug).ToLower()
+          if (-not $key -or $seen.ContainsKey($key)) { continue }
+          $seen[$key] = $true
+          [void]$all.Add([PSCustomObject]@{
+            slug = [string]$h.slug; title = [string]$h.title; title_zh = $null
+            description = $h.description; downloads = $h.downloads
+            loaders = @($h.loaders); game_versions = @($h.versions)
+          })
+        }
+        if ($all.Count -gt 0) { [void]$sources.Add('Modrinth(英)') }
+      } catch { $err += $_.Exception.Message }
+    }
+  }
+
+  if ($all.Count -eq 0 -and $err.Count -gt 0) { throw ('搜索失败: ' + ($err -join ' | ')) }
+  $src = 'none'
+  if ($sources.Count -gt 0) { $src = ($sources -join ' + ') }
+  return [PSCustomObject]@{ hits = @($all); source = $src; total = $all.Count }
+}
+
+function Show-ModSearch {
+  $cfg = Get-Config
+  if (-not $cfg.SelectedVersion) { Write-Host '  请先在版本管理中选择一个版本' -ForegroundColor Yellow; Pause-Any; return }
+  if (-not $cfg.SelectedLoader -or $cfg.SelectedLoader -eq 'vanilla') {
+    Write-Host '  当前是原版，无法搜索 Mod。请先安装并切换到 Fabric / Forge / NeoForge 版本。' -ForegroundColor Yellow
+    Pause-Any; return
+  }
+  $loader = Get-LoaderName $cfg
+  $mcVer = Get-McVersion $cfg
+  if (-not $mcVer) { Write-Host ('  无法推断 Minecraft 版本: ' + $cfg.SelectedVersion) -ForegroundColor Red; Pause-Any; return }
+  $q = $null
+  while ($true) {
+    if (-not $q) {
+      Clear-Host
+      Write-Host '=== Mod 搜索 ===' -ForegroundColor Cyan
+      Write-Host ('  当前: ' + $cfg.SelectedVersion + '   MC ' + $mcVer + ' / ' + $loader) -ForegroundColor Green
+      Write-Host '  支持中文名（机械动力、合成表）或英文名（sodium、jei）'
+      $q = Normalize-ModQuery (Read-Host '  搜索关键词 (留空返回)')
+      if (-not $q) { return }
+      Clear-Host
+      Write-Host ('  正在搜索 "' + $q + '" ...') -ForegroundColor DarkGray
+      $script:ModSearchResult = $null
+      try { $script:ModSearchResult = Search-ModCombined $q $mcVer $loader 20 }
+      catch { Write-Host ('  ' + $_.Exception.Message) -ForegroundColor Red; Pause-Any; $q = $null; continue }
+      if (-not $script:ModSearchResult.hits -or $script:ModSearchResult.hits.Count -eq 0) {
+        Write-Host '  没有结果，换个关键词试试' -ForegroundColor Yellow
+        Start-Sleep -Milliseconds 600
+        $q = $null; continue
+      }
+    }
+    $r = $script:ModSearchResult
+    $items = @()
+    for ($i = 0; $i -lt $r.hits.Count; $i++) {
+      $h = $r.hits[$i]
+      $zh = $h.title_zh; $en = $h.title
+      $label = if ($zh -and $en -and $zh -ne $en) { $zh + ' / ' + $en } elseif ($zh) { $zh } else { $en }
+      if (-not $label) { $label = $h.slug }
+      if ($label.Length -gt 46) { $label = $label.Substring(0, 46) + '...' }
+      $dl = 0; if ($h.downloads) { $dl = [int64]$h.downloads }
+      $items += ('{0}. {1}  [{2}]  ↓{3}' -f ($i + 1), $label, $h.slug, $dl)
+    }
+    $res = Show-Menu -Title ('=== 搜索结果: ' + $q + ' ===') -Header @(('  数据源: ' + $r.source + '   共 ' + $r.hits.Count + ' 条'), ('  MC ' + $mcVer + ' / ' + $loader)) -Items $items -Footer '↑↓ 选择   Enter 下载安装   F 换关键词   Esc 返回' -PageSize 12 -Keys 'F'
+    if ($res.Key -eq 'F') { $q = $null; continue }
+    if ($res.Key -eq 'Escape' -or $res.Index -lt 0) { return }
+    if ($res.Key -eq 'Enter' -or $res.Key -eq 'Number') {
+      Install-ModFromProject $r.hits[$res.Index].slug $cfg
+      Pause-Any
+    }
+  }
+}
+
+function Show-LocalMods {
+  $modDir = Get-ModDir
+  if (-not (Test-Path -LiteralPath $modDir)) { New-Item -ItemType Directory -Force -Path $modDir | Out-Null }
+  $filter = ''
+  while ($true) {
+    $all = @(Get-ChildItem -LiteralPath $modDir -File -EA SilentlyContinue | Where-Object { $_.Name -match '(?i)\.jar(\.disabled)?$' } | Sort-Object Name)
+    $files = $all
+    if ($filter) { $files = @($all | Where-Object { $_.Name -like ('*' + $filter + '*') }) }
+    $items = @()
+    foreach ($f in $files) {
+      $name = $f.Name
+      if ($name.ToLower().EndsWith('.disabled')) { $items += ('[禁用] ' + $name.Substring(0, $name.Length - 9)) }
+      else { $items += ('[启用] ' + $name) }
+    }
+    $header = @('  目录: ' + $modDir)
+    if ($filter) { $header += ('  筛选: "' + $filter + '"  匹配 ' + $files.Count + '/' + $all.Count) }
+    $footer = '↑↓ 选择   Enter 启用/禁用   D 删除   F 筛选   Esc 返回'
+    if ($items.Count -eq 0) { $items = @('(空)') }
+    $res = Show-Menu -Title '=== 本地 Mod ===' -Header $header -Items $items -Footer $footer -PageSize 14 -Keys 'DF'
+    if ($res.Key -eq 'Escape') { return }
+    if ($res.Key -eq 'F') {
+      $filter = (Read-Host '  筛选关键词（留空清除）').Trim()
+      continue
+    }
+    if ($files.Count -eq 0 -or $res.Index -lt 0 -or $res.Index -ge $files.Count) { continue }
+    $f = $files[$res.Index]
+    if ($res.Key -eq 'D') {
+      if (Read-YesNo ('删除 ' + $f.Name + ' ?')) { Remove-Item -LiteralPath $f.FullName -Force -EA SilentlyContinue }
+      continue
+    }
+    if ($res.Key -eq 'Enter' -or $res.Key -eq 'Number') {
+      if ($f.Name.ToLower().EndsWith('.disabled')) {
+        $newname = $f.Name.Substring(0, $f.Name.Length - 9)
+        Rename-Item -LiteralPath $f.FullName -NewName $newname -EA SilentlyContinue
+      } else {
+        Rename-Item -LiteralPath $f.FullName -NewName ($f.Name + '.disabled') -EA SilentlyContinue
+      }
+    }
+  }
+}
+
+function Show-ModMenu {
+  $pre = Get-Config
+  if (-not $pre.SelectedLoader -or $pre.SelectedLoader -eq 'vanilla') {
+    Clear-Host
+    Write-Host '=== Mod 管理 ===' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  当前是原版（vanilla），无法加载 Mod。' -ForegroundColor Yellow
+    Write-Host '  请先在「5. 安装 Mod 加载器」安装 Fabric / Forge / NeoForge，' -ForegroundColor Yellow
+    Write-Host '  然后在「2. 版本管理」中切换到对应加载器版本。' -ForegroundColor Yellow
+    Pause-Any
+    return
+  }
+  while ($true) {
+    $cfg = Get-Config
+    $v = $cfg.SelectedVersion; if (-not $v) { $v = '(未选择)' }
+    $mcv = Get-McVersion $cfg; if (-not $mcv) { $mcv = '(未知)' }
+    $res = Show-Menu -Title '=== Mod 管理 ===' -Header @(('  版本: ' + $v), ('  MC ' + $mcv + ' / ' + (Get-LoaderName $cfg))) -Items @('1. 搜索并下载 Mod', '2. 本地 Mod 管理 (启用/禁用/删除)', '0. 返回') -Footer '↑↓ 选择   Enter 确认   Esc 返回'
+    if ($res.Key -eq 'Escape' -or $res.Index -eq 2) { return }
+    if ($res.Index -eq 0) { Show-ModSearch }
+    elseif ($res.Index -eq 1) { Show-LocalMods }
+  }
+}
+
+function Select-Version($releaseOnly = $false) {
+  Clear-Host
+  Write-Host '正在获取版本列表...' -ForegroundColor DarkGray
+  $man = Get-VersionManifest
+  $all = @(Sort-Versions $man.versions)
+  if ($releaseOnly) { $all = @($all | Where-Object { $_.type -eq 'release' }) }
+  $items = @()
+  foreach ($v in $all) {
+    $tag = '[正式]'
+    if ($v.type -eq 'snapshot') { $tag = '[快照]' }
+    elseif ($v.type -ne 'release') { $tag = '[' + $v.type + ']' }
+    $items += ($v.id + '  ' + $tag)
+  }
+  $res = Show-Menu -Title '=== 可用版本 ===' -Header @('  共 ' + $all.Count + ' 个版本') -Items $items -Footer '↑↓ 翻滚   Enter 选择   Esc 返回' -PageSize 16
+  if ($res.Index -lt 0) { return $null }
+  return $all[$res.Index]
+}
+
+function Show-VersionMenu {
+  while ($true) {
+    $res = Show-Menu -Title '=== 版本管理 ===' -Items @('1. 查看并下载官方版本', '2. 已安装版本 (切换/删除)', '0. 返回') -Footer '↑↓ 选择   Enter 确认   Esc 返回'
+    if ($res.Key -eq 'Escape' -or $res.Index -eq 2) { return }
+    if ($res.Index -eq 0) {
+      $v = Select-Version $false
+      if (-not $v) { continue }
+      $m = Show-Menu -Title ('安装版本 ' + $v.id) -Items @('1. 前台安装（显示进度）', '2. 后台安装（可继续操作）', '0. 取消') -Footer '↑↓ 选择   Enter 确认'
+      if ($m.Index -eq 1) { Start-BackgroundInstall $v.id; Pause-Any }
+      elseif ($m.Index -eq 0) { try { Install-Version $v.id } catch { Write-Host ('安装失败: ' + $_.Exception.Message) -ForegroundColor Red }; Pause-Any }
+    } elseif ($res.Index -eq 1) {
+      $vd = Join-Path $script:McDir 'versions'
+      $vers = @()
+      if (Test-Path -LiteralPath $vd) { $vers = @(Get-ChildItem -LiteralPath $vd -Directory | Select-Object -ExpandProperty Name) }
+      if ($vers.Count -eq 0) { Clear-Host; Write-Host '  尚无已安装版本' -ForegroundColor Yellow; Pause-Any; continue }
+      $cur = (Get-Config).SelectedVersion
+      $items = @()
+      foreach ($n in $vers) { if ($n -eq $cur) { $items += ('* ' + $n) } else { $items += ('  ' + $n) } }
+      $sr = Show-Menu -Title '=== 已安装版本 ===' -Items $items -Footer '↑↓ 选择   Enter 切换   D 删除   Esc 返回' -Keys 'D'
+      if ($sr.Key -eq 'Escape' -or $sr.Index -lt 0) { continue }
+      $name = $vers[$sr.Index]
+      if ($sr.Key -eq 'D') {
+        if ($name -eq $cur) { Write-Host '  不能删除当前版本，请先切换' -ForegroundColor Red; Pause-Any; continue }
+        $deps = @()
+        foreach ($d in @(Get-ChildItem -LiteralPath $vd -Directory -EA SilentlyContinue)) {
+          if ($d.Name -eq $name) { continue }
+          $jf = Join-Path $d.FullName ($d.Name + '.json')
+          if (-not (Test-Path -LiteralPath $jf)) { continue }
+          try { $jj = Get-Content -LiteralPath $jf -Raw -Encoding UTF8 | ConvertFrom-Json; if ($jj.inheritsFrom -eq $name) { $deps += $d.Name } } catch {}
+        }
+        if ($deps.Count -gt 0) { Write-Host ('  被以下版本继承，先删除它们: ' + ($deps -join ', ')) -ForegroundColor Red; Pause-Any; continue }
+        if (Read-YesNo ('删除 ' + $name + ' ?')) {
+          try { Remove-Item -LiteralPath (Join-Path $vd $name) -Recurse -Force; Write-Host '  已删除' -ForegroundColor Green } catch { Write-Host ('  删除失败: ' + $_.Exception.Message) -ForegroundColor Red }
+          Pause-Any
+        }
+        continue
+      }
+      $cfg = Get-Config
+      $cfg.SelectedVersion = $name
+      $cfg.SelectedLoaderVersion = ''
+      if ($name -match '^fabric-loader-(.+)-([0-9].*)$') { $cfg.SelectedLoader = 'fabric'; $cfg.SelectedLoaderVersion = $Matches[1] }
+      elseif ($name -match '^neoforge-(.+)$') { $cfg.SelectedLoader = 'neoforge'; $cfg.SelectedLoaderVersion = $Matches[1] }
+      elseif ($name -match '^(.+)-forge-(.+)$') { $cfg.SelectedLoader = 'forge'; $cfg.SelectedLoaderVersion = $Matches[2] }
+      else { $cfg.SelectedLoader = 'vanilla' }
+      if ($cfg.GameDir) { $cfg.GameDir = '' }
+      Save-Config $cfg
+    }
+  }
+}
+
+function Show-JavaMenu {
+  while ($true) {
+    $cur = Find-Java
+    $header = @()
+    if ($cur) { $header += ('  当前: ' + $cur); $header += ('  版本: ' + (Get-JavaVersion $cur)) }
+    else { $header += '  当前: (无)' }
+    $res = Show-Menu -Title '=== Java 管理 ===' -Header $header -Items @('1. 安装 Java 8', '2. 安装 Java 17', '3. 安装 Java 21', '4. 手动指定 java.exe 路径', '0. 返回') -Footer '↑↓ 选择   Enter 确认   Esc 返回'
+    if ($res.Key -eq 'Escape' -or $res.Index -eq 4) { return }
+    if ($res.Index -in @(0, 1, 2)) {
+      $m = @(8, 17, 21)[$res.Index]
+      try { Install-Java $m } catch { Write-Host ('安装失败: ' + $_.Exception.Message) -ForegroundColor Red }
+      Pause-Any
+    } elseif ($res.Index -eq 3) {
+      $p = Read-Host '  java.exe 路径'
+      if ($p -and (Test-Path -LiteralPath $p)) { $cfg = Get-Config; $cfg.JavaPath = $p; Save-Config $cfg; Write-Host '  已保存' -ForegroundColor Green }
+      else { Write-Host '  路径无效' -ForegroundColor Red }
+      Pause-Any
+    }
+  }
+}
+
+function Show-Settings {
+  while ($true) {
+    $cfg = Get-Config
+    $gd = $cfg.GameDir; if (-not $gd) { $gd = '(默认 .minecraft)' }
+    $ja = $cfg.JvmArgs; if (-not $ja) { $ja = '(无)' }
+    $eg = $cfg.ExtraGameArgs; if (-not $eg) { $eg = '(无)' }
+    $items = @(
+      '1. 玩家名       : ' + $cfg.PlayerName,
+      '2. 内存 (MB)    : ' + $cfg.MemoryMB,
+      '3. 窗口大小     : ' + $cfg.WindowWidth + ' x ' + $cfg.WindowHeight,
+      '4. 额外 JVM 参数: ' + $ja,
+      '5. 游戏目录     : ' + $gd,
+      '6. 全屏启动     : ' + $(if ($cfg.Fullscreen) { '是' } else { '否' }),
+      '7. 演示模式     : ' + $(if ($cfg.DemoMode) { '是' } else { '否' }),
+      '8. 额外游戏参数 : ' + $eg,
+      '9. 调试模式     : ' + $(if ($cfg.DebugMode) { '开' } else { '关' }),
+      '0. 返回'
+    )
+    $res = Show-Menu -Title '=== 设置 ===' -Items $items -Footer '↑↓ 选择   Enter 修改/切换   Esc 返回'
+    if ($res.Key -eq 'Escape' -or $res.Index -eq 9) { return }
+    switch ($res.Index) {
+      0 { $n = Read-Host '  玩家名'; if ($n) { $cfg.PlayerName = $n.Trim(); Save-Config $cfg } }
+      1 {
+        $m = Read-Host '  内存 MB (512-65536)'
+        if ($m -match '^\d+$' -and [int]$m -ge 512 -and [int]$m -le 65536) { $cfg.MemoryMB = [int]$m; Save-Config $cfg }
+        else { Write-Host '  无效数值' -ForegroundColor Red; Pause-Any }
+      }
+      2 {
+        $w = Read-Host '  宽度'; $h = Read-Host '  高度'
+        if ($w -match '^\d+$' -and $h -match '^\d+$') { $cfg.WindowWidth = [int]$w; $cfg.WindowHeight = [int]$h; Save-Config $cfg }
+        else { Write-Host '  无效数值' -ForegroundColor Red; Pause-Any }
+      }
+      3 { $cfg.JvmArgs = (Read-Host '  额外 JVM 参数（空格分隔）'); Save-Config $cfg }
+      4 {
+        $g = Read-Host '  游戏目录（留空恢复默认）'
+        if (-not $g) { $cfg.GameDir = ''; Save-Config $cfg }
+        elseif (Test-Path -LiteralPath $g) { $cfg.GameDir = $g; Save-Config $cfg }
+        else { Write-Host '  目录不存在' -ForegroundColor Red; Pause-Any }
+      }
+      5 { $cfg.Fullscreen = (-not $cfg.Fullscreen); Save-Config $cfg }
+      6 { $cfg.DemoMode = (-not $cfg.DemoMode); Save-Config $cfg }
+      7 { $cfg.ExtraGameArgs = (Read-Host '  额外游戏参数（空格分隔）'); Save-Config $cfg }
+      8 { $cfg.DebugMode = (-not $cfg.DebugMode); Save-Config $cfg }
+    }
+  }
+}
+
+function Show-LoaderMenu {
+  while ($true) {
+    $cfg = Get-Config
+    $v = $cfg.SelectedVersion; if (-not $v) { $v = '(未选择)' }
+    $res = Show-Menu -Title '=== 安装 Mod 加载器 ===' -Header @('  当前版本: ' + $v) -Items @(
+      '1. 安装 Fabric（前台）', '2. 安装 Forge（前台）', '3. 安装 NeoForge（前台）',
+      '4. 安装 Fabric（后台）', '5. 安装 Forge（后台）', '6. 安装 NeoForge（后台）', '0. 返回'
+    ) -Footer '↑↓ 选择   Enter 确认   Esc 返回'
+    if ($res.Key -eq 'Escape' -or $res.Index -eq 6) { return }
+    if (-not $cfg.SelectedVersion) { Write-Host '  请先选择一个 Minecraft 版本' -ForegroundColor Yellow; Pause-Any; continue }
+    switch ($res.Index) {
+      0 { Install-Fabric }
+      1 { Install-Forge }
+      2 { Install-NeoForge }
+      3 { Start-BackgroundTask ('安装 Fabric (' + $cfg.SelectedVersion + ')') 'fabricinstall'; Pause-Any }
+      4 { Start-BackgroundTask ('安装 Forge (' + $cfg.SelectedVersion + ')') 'forgeinstall'; Pause-Any }
+      5 { Start-BackgroundTask ('安装 NeoForge (' + $cfg.SelectedVersion + ')') 'neoforgeinstall'; Pause-Any }
+    }
+  }
+}
+
 function Show-ModpackMenu {
   while ($true) {
-    Clear-Host
-    Write-Host '=== 整合包导入 ===' -ForegroundColor Cyan
-    Write-Host '  支持 Modrinth 整合包 (.mrpack)'
-    Write-Host ''
-    Write-Host '  1. 从文件导入 (.mrpack)'
-    Write-Host '  2. 查看已导入实例'
-    Write-Host '  0. 返回'
-    $in = Read-Host '  > '
-    switch ($in) {
-      '1' {
-        $p = Read-Host '  输入 .mrpack 文件完整路径'
-        $p = $p.Trim('"').Trim()
-        if ($p -and (Test-Path -LiteralPath $p)) { Import-Mrpack $p }
-        else { Write-Host '  文件不存在' -ForegroundColor Red; Pause-Any }
+    $res = Show-Menu -Title '=== 整合包导入 ===' -Header @('  支持 Modrinth 整合包 (.mrpack)') -Items @('1. 从文件导入 (.mrpack)', '2. 已导入实例 (切换)', '0. 返回') -Footer '↑↓ 选择   Enter 确认   Esc 返回'
+    if ($res.Key -eq 'Escape' -or $res.Index -eq 2) { return }
+    if ($res.Index -eq 0) {
+      $p = (Read-Host '  .mrpack 文件完整路径').Trim('"').Trim()
+      if ($p -and (Test-Path -LiteralPath $p)) { Import-Mrpack $p } else { Write-Host '  文件不存在' -ForegroundColor Red; Pause-Any }
+    } elseif ($res.Index -eq 1) {
+      $idir = Join-Path $script:McDir 'instances'
+      $ds = @()
+      if (Test-Path -LiteralPath $idir) { $ds = @(Get-ChildItem -LiteralPath $idir -Directory -EA SilentlyContinue) }
+      if ($ds.Count -eq 0) { Clear-Host; Write-Host '  (无已导入实例)' -ForegroundColor Yellow; Pause-Any; continue }
+      $cfg = Get-Config
+      $items = @()
+      foreach ($d in $ds) { if ($d.FullName -eq $cfg.GameDir) { $items += ('* ' + $d.Name) } else { $items += ('  ' + $d.Name) } }
+      $sr = Show-Menu -Title '=== 已导入实例 ===' -Items $items -Footer '↑↓ 选择   Enter 切换   Esc 返回'
+      if ($sr.Index -ge 0) {
+        $cfg.GameDir = $ds[$sr.Index].FullName
+        Save-Config $cfg
       }
-      '2' {
-        $idir = Join-Path $script:McDir 'instances'
-        Clear-Host
-        Write-Host '=== 已导入实例 ===' -ForegroundColor Cyan
-        if (Test-Path -LiteralPath $idir) {
-          $ds = @(Get-ChildItem -LiteralPath $idir -Directory -EA SilentlyContinue)
-          if ($ds.Count -eq 0) { Write-Host '  (无)' -ForegroundColor Yellow }
-          for ($i = 0; $i -lt $ds.Count; $i++) { Write-Host ('  ' + ($i+1) + '. ' + $ds[$i].Name) }
-          if ($ds.Count -gt 0) {
-            $sel = Read-Host '  输入序号切换到该实例 (回车返回)'
-            if ($sel -match '^[0-9]+$') {
-              $n = [int]$sel - 1
-              if ($n -ge 0 -and $n -lt $ds.Count) {
-                $cfg = Get-Config; $cfg.GameDir = $ds[$n].FullName; Save-Config $cfg
-                Write-Host ('  已切换到: ' + $ds[$n].Name) -ForegroundColor Green
-              }
-            }
-          }
-        } else { Write-Host '  (无)' -ForegroundColor Yellow }
-        Pause-Any
-      }
-      '0' { return }
     }
   }
 }
@@ -2324,57 +2506,44 @@ function Show-ModpackMenu {
 function Show-MainMenu {
   while ($true) {
     $cfg = Get-Config
-    Clear-Host
-    Write-Host '==========================================' -ForegroundColor Cyan
-    Write-Host '             CCL Minecraft 启动器' -ForegroundColor Cyan
-    Write-Host '==========================================' -ForegroundColor Cyan
-    Write-Host ('  玩家   : ' + $cfg.PlayerName)
+    $needJ = 8
+    if ($cfg.SelectedVersion) { $mcv = Get-McVersion $cfg; if ($mcv) { $needJ = Get-JavaMajorForMc $mcv } }
+    $j = Find-JavaFor $needJ
+    if (-not $j) { $j = '(未安装，启动时自动装 Java ' + $needJ + ')' }
     $v = $cfg.SelectedVersion; if (-not $v) { $v = '(未选择)' }
-    Write-Host ('  版本   : ' + $v)
-    Write-Host ('  加载器 : ' + $cfg.SelectedLoader)
-    Write-Host ('  系统   : ' + $script:OSArch + '  (' + $(if ($script:Is64) { '64 位' } else { '32 位' }) + ')')
-    $j = Find-Java
-    if (-not $j) { $j = '(自动安装)' }
-    Write-Host ('  Java   : ' + $j)
-    Write-Host '------------------------------------------'
-    Write-Host '  1. 启动游戏'
-    Write-Host '  2. 版本管理'
-    Write-Host '  3. Java 管理'
-    Write-Host '  4. Mod 管理 (搜索下载/本地管理)'
-    Write-Host '  5. 安装 Mod 加载器 (Fabric/Forge/NeoForge)'
-    Write-Host '  6. 整合包导入'
-    Write-Host '  7. 设置'
-    Write-Host '  8. 后台任务'
-    Write-Host '  0. 退出'
+    $header = @(
+      ('  玩家   : ' + $cfg.PlayerName),
+      ('  版本   : ' + $v),
+      ('  加载器 : ' + $cfg.SelectedLoader),
+      ('  系统   : ' + $script:OSArch + '  (' + $(if ($script:Is64) { '64 位' } else { '32 位' }) + ')'),
+      ('  Java   : ' + $j + '   [需 ' + $needJ + ']')
+    )
     $bt = Get-BackgroundTask
-    if ($bt -and (Test-BackgroundTaskRunning $bt)) {
-      Write-Host ''
-      Show-BackgroundStatus $true
-    }
-    Write-Host '------------------------------------------'
-    $in = Read-Host '  请选择'
+    if ($bt -and (Test-BackgroundTaskRunning $bt)) { $header += ('  后台   : ' + $bt.Label + ' [进行中]') }
+    $items = @(
+      '1. 启动游戏', '2. 版本管理', '3. Java 管理', '4. Mod 管理 (搜索下载/本地管理)',
+      '5. 安装 Mod 加载器 (Fabric/Forge/NeoForge)', '6. 整合包导入', '7. 设置', '8. 后台任务', '0. 退出'
+    )
+    $r = Show-Menu -Title '========== CCL Minecraft 启动器 ==========' -Header $header -Items $items -Footer '↑↓ 选择   Enter 确认   数字直选   Esc 退出'
+    if ($r.Key -eq 'Escape' -or $r.Index -eq 8) { return }
     try {
-    switch ($in) {
-      '1' {
-        if (-not $cfg.SelectedVersion) {
-          $vv = Select-Version $false
-          if ($vv) { $cfg.SelectedVersion = $vv.id; Save-Config $cfg }
+      switch ($r.Index) {
+        0 {
+          if (-not $cfg.SelectedVersion) {
+            $vv = Select-Version $false
+            if (-not $vv) { continue }
+            $cfg.SelectedVersion = $vv.id; Save-Config $cfg
+          }
+          try { Start-Minecraft $cfg.SelectedVersion; Pause-Any } catch { Write-Host ('启动失败: ' + $_.Exception.Message) -ForegroundColor Red; Pause-Any }
         }
-        if ($cfg.SelectedVersion) {
-          try { Start-Minecraft $cfg.SelectedVersion }
-          catch { Write-Host ('启动失败: ' + $_.Exception.Message) -ForegroundColor Red }
-          Pause-Any
-        }
+        1 { Show-VersionMenu }
+        2 { Show-JavaMenu }
+        3 { Show-ModMenu }
+        4 { Show-LoaderMenu }
+        5 { Show-ModpackMenu }
+        6 { Show-Settings }
+        7 { Show-BackgroundStatus $false }
       }
-      '2' { Show-VersionMenu }
-      '3' { Show-JavaMenu }
-      '4' { Show-ModMenu }
-      '5' { Show-LoaderMenu }
-      '6' { Show-ModpackMenu }
-      '7' { Show-Settings }
-      '8' { Show-BackgroundStatus $false }
-      '0' { return }
-    }
     } catch {
       Write-Host ''
       Write-Host ('操作出错: ' + $_.Exception.Message) -ForegroundColor Red
