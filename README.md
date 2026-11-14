@@ -1,265 +1,124 @@
-# CCL — 纯 CMD 的 Minecraft 启动器
+# CCL — 单文件 Windows Minecraft 启动器
 
-> 单文件 `ccl.bat`，双击即用。零依赖（仅用 Windows 自带的 cmd / PowerShell / curl / tar），自动在所在目录创建 `ccl/` 与 `.minecraft/`。
+> 这是一个适合测试的 beta 版本。整个启动器只有一个 `ccl.bat`，双击即可运行，零依赖，直接在同目录创建 `ccl/` 和 `.minecraft/`。
 
-> **版权提示**：本项目是启动器工具，不包含、不分发任何 Minecraft 游戏文件、材质、音效或商标资源；所有游戏文件均由使用者通过官方渠道获取。Minecraft 是 Mojang Studios / Microsoft 的商标，本项目与其无隶属、赞助或背书关系。使用者须自行确保拥有正版授权，并遵守 [Minecraft EULA](https://www.minecraft.net/eula) 与[商业使用指南](https://www.minecraft.net/usage-guidelines)。
+> 该项目只负责启动器功能，不包含、不分发任何 Minecraft 游戏本体或资源文件。所有游戏资源均由使用者按官方方式获取。
 
-**当前版本：v1.0.2**
+## 版本信息
 
----
+- 版本：`v1.0.3 Beta`
+- 适用平台：Windows 10 1803+
+- 运行方式：双击 `ccl.bat` 或在 cmd / PowerShell 中运行
 
-## 特性
+## 主要功能
 
-### 版本管理
-- 官方接口拉取完整版本清单（900+ 版本），**语义版本排序**：正式版按 `大版本.小版本.补丁` 降序，快照/预发布按时间倒序排在其后
-- 一键安装：客户端主文件 + 依赖库 + natives 解压 + 资源索引 + 全部资源对象
-- 支持版本继承（`inheritsFrom`），Fabric / Forge / NeoForge 版本与整合包实例均可解析
-- 已装版本可切换、删除（当前版本有保护）
+### 1. 版本管理
+- 浏览 Mojang 官方版本列表
+- 支持正式版、快照版、预发布版本
+- 自动下载客户端、依赖库、natives、资源索引
+- 可切换或删除已安装版本
 
-### 三种加载器
-| 加载器 | 前台 | 后台 |
-|---|---|---|
-| Fabric | ✅ | ✅ |
-| Forge | ✅ | ✅ |
-| NeoForge | ✅ | ✅ |
+### 2. Java 自动管理
+- 自动检测系统 Java / 已安装 JDK / 配置中的 Java 路径
+- 按游戏版本需求自动选用合适 Java
+- 一键安装 Java 8 / 17 / 21
+- 支持手动指定 `java.exe` 路径
 
-- **Fabric**：从 `meta.fabricmc.net` 拉取该 MC 版本专属的 loader 列表，可选稳定版
-- **Forge**：从 promotions 接口取 recommended / latest
-- **NeoForge**：从镜像 Maven 元数据自动匹配版本（如 MC 1.21.1 → NeoForge 21.1.x），安装前经镜像**预置 70 个依赖库**，避免安装器逐个访问不可达源
+### 3. 加载器支持
+- Fabric
+- Forge
+- NeoForge
+- 支持前台安装与后台安装
 
-### 整合包导入
-- 支持 **Modrinth `.mrpack`**
-- 解析 `modrinth.index.json`：读取 `dependencies`（minecraft / fabric-loader / forge / neoforge / quilt-loader）、按 `files` 并行下载客户端文件、应用 `overrides` 与 `client-overrides`
-- 导入到 `.minecraft/instances/<包名>/`，自动切换游戏目录并按依赖询问安装加载器
+### 4. Mod 管理
+- 支持 Modrinth 搜索
+- 可按 Minecraft 版本 + 加载器过滤
+- 中文关键词搜索（优先中文 API，失败自动回退到 Modrinth）
+- 安装前二次校验 Mod 文件适配当前加载器
+- 本地 Mod 开启/关闭/删除管理
 
-### Mod 管理
-- **搜索下载**：按当前游戏版本 + 加载器过滤，自动识别加载器版本（如 `neoforge-21.1.264`）对应的真实 MC 版本
-- **中文关键词支持**：接入[麦块开放 API](https://api.minekuai.cn)（内置中文翻译的 Mod 库，含 CurseForge / Modrinth 双源），直接搜中文即可命中本体（"机械动力" → Create、"合成表" → JEI），同时显示中文标题与原名
-- **降级链**：麦块 API 无结果或不可用时自动回退到 Modrinth 原生搜索，中文效果较差但英文完全可用
-- **加载器校验**：安装前二次确认返回文件的 `loaders` 字段包含当前加载器，不匹配时明确拒绝并列出可用加载器
-- **模糊搜索**：输入部分名称即可（`sodi` → Sodium）
-- **本地 Mod 管理**：`f关键词` 模糊筛选、`e序号` 启用、`d序号` 禁用/删除
-- **原版拦截**：原版（vanilla）下进入 Mod 管理会明确提示先安装加载器
+### 5. 整合包导入
+- 支持导入 Modrinth `.mrpack`
+- 自动解析依赖和 overrides
+- 自动识别 Fabric / Forge / NeoForge / Quilt 相关依赖
 
-### Java 管理
-- 自动检测（配置指定 → `ccl/java` 下各版本 → 系统 PATH），**按版本需求挑选**：优先满足 `javaVersion.majorVersion`，而非死守配置
-- 一键安装 JDK 8 / 17 / 21（清华 TUNA 镜像优先，失败回退 Adoptium 官方源），**按系统架构下载 x64/x86**
-- 启动前自动校验，版本不足时提示安装
+### 6. 稳定性与诊断
+- 自动镜像回退（如 BMCLAPI）
+- 批量下载与失败重试
+- SHA1 校验
+- 游戏崩溃时给出中文排查建议
+- 调试模式可输出完整启动参数和日志
 
-### 网络与下载
-- **BMCBL 镜像回退**：为 NeoForge / Forge Maven、Mojang meta、资源站 URL 自动生成镜像备选，原站不可达时自动切换
-- **自适应多线程**：按 CPU 逻辑核心数计算并发（`cores × 4`，钳制 8~32）
-- **进度条**：单文件显示 `字节/总量 + 速度`，批量显示 `完成数/总数 + 总字节 + 速度`
-- **健壮性**：SHA1 校验、空文件检测、失败重试、**主机可达性预检**（TCP 443，3s）、总超时 1800s + 停滞检测 90s
+## 目录结构
 
-### 后台任务（非阻塞）
-- 版本安装、Fabric/Forge/NeoForge 安装均可**后台执行**，立即返回主菜单
-- 主菜单顶部实时显示 `后台任务: <标签> [进行中/已结束 xx%]`
-- 菜单「8. 后台任务」查看详情、完成后清除记录
+```text
+项目根目录/
+├─ ccl.bat                 启动器本体
+├─ ccl/                    启动器配置、缓存和 Java
+│  ├─ config.json
+│  ├─ cache/
+│  ├─ logs/
+│  └─ java/
+├─ .minecraft/            游戏目录
+│  ├─ versions/
+│  ├─ libraries/
+│  ├─ assets/
+│  ├─ mods/
+│  └─ instances/
+└─ LICENSE
+```
 
-### 崩溃诊断
-游戏异常退出时自动分析 `logs/latest.log`，输出中文排查建议：
-- `UnsupportedClassVersionError` → Java 版本过低及对应要求
-- `OutOfMemoryError` → 调大内存
-- `NoClassDefFoundError` → 依赖缺失 / Mod 不匹配
-- `UnsatisfiedLinkError / lwjgl` → 位数不匹配或显卡驱动
-- `Pixel format / OpenGL` → 显卡驱动
-- `Duplicate mods / Mixin apply failed` → Mod 冲突
+## 系统要求
 
-并展示最近关键日志行、完整日志路径、崩溃报告目录。
+- Windows 10 1803+
+- 系统自带 `curl.exe` 和 `tar.exe`
+- 建议不要把启动器放在中文路径或空格较多的目录中
 
-### 调试模式
-- 在「7. 设置 → 9. 调试模式」开启
-- 启动时打印完整参数列表：Java 路径、版本、加载器、工作目录、内存、窗口、额外参数，classpath 逐条展开
-- 游戏运行期间的 stdout/stderr **实时显示在控制台**，同时写入 `ccl/logs/launch_<时间戳>.log`（UTF-8，AutoFlush，可边玩边 tail）
-- 游戏退出后显示退出码、本次日志路径、游戏 `logs/latest.log` 路径
-- 与崩溃诊断联动：异常退出时同样触发中文排查建议
-
-### 其他
-- **离线登录**：按 `MD5("OfflinePlayer:名称")` 生成 v3 UUID
-- **默认中文**：首次启动写入 `options.txt` 的 `lang:zh_cn`
-- **32/64 位自适应**：规则判断、natives 选择、JDK 下载全部按真实架构
-- **PCL2 目录兼容**：读取 `PCL.ini` 的 `VersionArgumentIndie`，识别 `versions/<id>/<id>-natives` 等既有布局
-- **启动参数**：全屏、演示模式、额外游戏参数、额外 JVM 参数、内存、窗口尺寸、独立游戏目录
-
----
-
-## 使用
+## 快速开始
 
 1. 下载 `ccl.bat`
-2. 双击运行（或在 cmd 中执行）
-3. 首次运行自动创建 `ccl/`（配置、缓存、JDK）与 `.minecraft/`（游戏数据）
+2. 把它放到一个空目录
+3. 双击运行
+4. 在主菜单中选择：
+   - `2`：版本管理
+   - `3`：Java 管理
+   - `5`：安装 Fabric / Forge / NeoForge
+   - `1`：启动游戏
 
-### 主菜单
+## 主菜单示例
 
-```
+```text
 1. 启动游戏
 2. 版本管理
 3. Java 管理
-4. Mod 管理 (搜索下载/本地管理)
-5. 安装 Mod 加载器 (Fabric/Forge/NeoForge)
+4. Mod 管理
+5. 安装 Mod 加载器
 6. 整合包导入
 7. 设置
 8. 后台任务
 0. 退出
 ```
 
-### 首次使用建议流程
+## 说明
 
-```
-2 → 安装一个版本（如 1.20.1）
-3 → 安装 Java 17（或启动时自动安装）
-7 → 设置玩家名、内存
-1 → 启动游戏
-```
+- 本启动器是一个单文件工具，便于测试与轻度使用
+- 适合单机、离线模式和开发测试场景
+- 由于是测试版，可能存在兼容性问题，欢迎通过 Issues 提交反馈
 
----
+## 许可证
 
-## 目录结构
+本项目使用 MIT License，详情见 [LICENSE](LICENSE)。
 
-```
-项目根/
-├─ ccl.bat                 启动器本体
-├─ ccl/
-│  ├─ config.json          配置
-│  ├─ cache/               下载缓存、临时文件、后台任务日志
-│  ├─ logs/                调试模式启动日志（launch_<时间戳>.log）
-│  └─ java/                自动安装的 JDK（jdk8 / jdk17 / jdk21）
-└─ .minecraft/
-   ├─ versions/            各版本（含 <id>-natives 或 natives/）
-   ├─ libraries/           依赖库
-   ├─ assets/              资源（indexes + objects）
-   ├─ mods/                全局 Mod
-   └─ instances/           整合包实例
-```
+## 免责声明
 
-### 版本隔离
+本项目仅用于 Minecraft 启动辅助功能，使用者需自行遵守相关地区法律法规和 Mojang / Microsoft 的可用条款。启动器不负责也不分发任何游戏文件内容。
 
-- 默认不隔离（Mod 放 `.minecraft/mods`）
-- 若版本目录内已存在 `mods/saves/resourcepacks/config` 结构，或 `PCL.ini` 中 `VersionArgumentIndie=1`，则自动按隔离模式使用 `versions/<id>/` 作为工作目录
+## 更新说明（Beta）
 
----
+本版本以“更稳定、可用性更好、搜索体验更顺”的思路为主，重点覆盖：
+- 更顺畅的启动流程
+- 改进 Mod 搜索与筛选
+- 更稳健的加载器安装与下载回退
+- 更友好的错误提示和崩溃排查
 
-## 配置项（`ccl/config.json`）
-
-| 字段 | 说明 | 默认 |
-|---|---|---|
-| `PlayerName` | 离线登录玩家名 | `Player` |
-| `JavaPath` | 指定 java.exe 路径 | 空（自动检测） |
-| `SelectedVersion` | 当前版本 id | 空 |
-| `SelectedLoader` | `vanilla` / `fabric` / `forge` / `neoforge` | `vanilla` |
-| `SelectedLoaderVersion` | 加载器版本号 | 空 |
-| `MemoryMB` | 内存（512–65536） | `2048` |
-| `WindowWidth` / `WindowHeight` | 窗口尺寸 | `854` / `480` |
-| `GameDir` | 独立游戏目录（整合包实例用） | 空 |
-| `JvmArgs` | 额外 JVM 参数 | 空 |
-| `ExtraGameArgs` | 额外游戏参数 | 空 |
-| `Fullscreen` | 全屏启动 | `false` |
-| `DemoMode` | 演示模式 | `false` |
-| `DebugMode` | 调试模式（打印启动参数 + 输出写入 `ccl/logs/`） | `false` |
-| `VersionIsolation` | 版本隔离（`PCL.ini` 优先） | `false` |
-
-配置写入是**原子**的（先写 `.tmp` 再替换，保留 `.bak`）；文件损坏时自动备份为 `.corrupt` 并回退默认值；数值字段读取时自动钳制。
-
----
-
-## 命令行自检
-
-```bat
-ccl.bat --test manifest            :: 版本清单连通性
-ccl.bat --test resolve 1.20.1      :: 版本解析
-ccl.bat --test dryrun 1.20.1       :: 打印完整启动命令，不启动
-ccl.bat --test findjava            :: Java 检测
-ccl.bat --test uuid Player         :: 离线 UUID
-ccl.bat --test isolation 1.20.1    :: 隔离目录判定
-ccl.bat --test importpack "<路径>"  :: 导入整合包（非交互）
-```
-
----
-
-## 常见问题
-
-**Q：启动卡在下载进度不动？**
-A：多为源站不可达。启动器已内置镜像回退与主机预检；若仍失败，换网络或在能访问 `maven.neoforged.net` 时重试（会自动补齐）。
-
-**Q：NeoForge 报 `ClassNotFoundException: cpw.mods.bootstraplauncher.BootstrapLauncher`？**
-A：依赖库未补齐。重新执行「5 → 安装 NeoForge」，会经镜像预置依赖。
-
-**Q：`ResolutionException: Module minecraft contains package net.minecraft.server`？**
-A：BootstrapLauncher 自管 minecraft 模块，classpath 不能再放原版 jar。v1.0.1 已修复。
-
-**Q：路径含 `[ ]` 方括号（如整合包名）报"路径不存在"？**
-A：v1.0.1 已改用 `-LiteralPath`，不会再把方括号当通配符。
-
-**Q：想用已有 PCL2 的 `.minecraft`？**
-A：直接把 `ccl.bat` 放到 PCL2 根目录即可，会读取 `PCL.ini` 并识别既有版本/隔离结构。
-
-**Q：游戏启动失败，想看详细过程？**
-A：在「7. 设置 → 9. 调试模式」开启后启动，会打印完整 JVM/游戏参数（classpath 逐条展开），并把游戏输出实时写入 `ccl/logs/launch_<时间戳>.log`。异常退出时还会附带崩溃诊断。
-
-**Q：中文搜 Mod 搜不到结果？**
-A：中文搜索依赖麦块开放 API（`api.minekuai.cn`）。若该服务不可达，程序会自动降级到 Modrinth 原生搜索，此时中文关键词效果较差，建议改用英文名（如 `sodium`、`jei`）。
-
-**Q：搜索结果显示的 Mod 装不上或版本不对？**
-A：搜索时会按当前 MC 版本 + 加载器过滤，安装前还会二次校验返回文件的 `loaders` 字段。若提示"该文件不适用于 xxx"，说明该 Mod 确实没有当前加载器的版本（例如 Sodium 只有 Fabric/Quilt 版，Forge 上应找 Embeddium）。
-
----
-
-## 数据来源
-
-- 版本清单与资源：`piston-meta.mojang.com`、`resources.download.minecraft.net`
-- Fabric：`meta.fabricmc.net`
-- Forge：`files.minecraftforge.net`
-- NeoForge：`maven.neoforged.net`
-- Mod：`api.modrinth.com`
-- Mod（中文搜索）：[麦块开放 API](https://api.minekuai.cn)（`api.minekuai.cn`）
-- JDK：清华 TUNA / Adoptium
-- 镜像：BMCBL（`bmclapi2.bangbang93.com`）
-
----
-
-## 版权与免责声明
-
-**1. 工具性质**
-本项目（下称"本启动器"）是一款开源的 Minecraft 启动辅助工具，仅实现版本清单解析、文件下载调度、Java 环境管理与命令行参数拼装等**通用技术功能**。本启动器不修改、不破解、不绕过 Minecraft 客户端的任何验证机制。
-
-**2. 不包含游戏内容**
-本仓库**不包含、不托管、不分发**任何 Minecraft 游戏本体、客户端/服务端 jar、资源文件（assets）、音效、字体、材质、地图或任何 Mojang 享有著作权的素材。运行本启动器时所需的游戏文件，均由程序通过 Mojang 公开提供的官方接口（`piston-meta.mojang.com`、`resources.download.minecraft.net` 等）下载到使用者本地，其版权归 Mojang Studios 所有。
-
-**3. 商标声明**
-"Minecraft"、"我的世界"及相关标识、名称、图像均为 Mojang Studios / Microsoft Corporation 的商标或注册商标。本项目的命名、描述与文档中对上述名称的引用，**仅用于说明兼容性与技术用途**，不构成商标使用许可，也不表示本项目获得 Mojang 或 Microsoft 的授权、赞助、认可或关联。
-
-**4. 使用者义务**
-使用本启动器即表示你确认并同意：
-
-- 你已通过官方渠道合法购买并持有 Minecraft 正版授权；
-- 你的使用行为符合 [Minecraft EULA](https://www.minecraft.net/eula)、[商业使用指南](https://www.minecraft.net/usage-guidelines) 及你所在地区的法律法规；
-- 你不得将本启动器用于商业运营、付费代登录、绕过正版验证或任何侵犯他人权利的场景。
-
-**5. 离线模式说明**
-本启动器提供离线启动能力，其设计用途为**单机游玩、局域网调试与开发测试**。使用者应自行确保该使用场景不违反 EULA 及相关规定。本启动器不提供、不支持任何绕过正版认证以接入正版服务器的手段。
-
-**6. 第三方内容**
-
-- **Mod 与整合包**：通过本启动器检索、下载的 Mod 与整合包，其著作权归各自作者所有，适用其各自的许可证（如 MIT、GPL、All Rights Reserved 等）。本启动器仅提供检索与下载的技术通道，不对第三方内容的合法性、安全性或可用性作出担保。使用者应自行阅读并遵守对应项目的授权条款。
-- **镜像服务**：本启动器可选用第三方镜像（如 BMCBL）加速官方公开资源的分发。镜像内容的所有权与责任归属各镜像运营方。
-- **JDK**：本启动器可下载 Eclipse Temurin（Adoptium）或经由镜像分发的 OpenJDK 构建，其许可条款见对应发行方（通常为 GPLv2 + Classpath Exception）。
-
-**7. 免责条款**
-本启动器按"现状"提供，不附带任何明示或默示的担保，包括但不限于对适销性、特定用途适用性与非侵权性的担保。使用者因使用或无法使用本启动器而产生的任何直接或间接损失（包括但不限于存档损坏、账号异常、数据丢失、设备故障），作者与贡献者不承担任何责任。使用风险由使用者自行承担。
-
-**8. 权利主张与下架**
-本项目尊重他人的知识产权。若相关权利人认为本仓库中的任何内容（包括文档、示例、命名或描述）侵犯其合法权益，请通过仓库 Issues 提出，并附上权利证明与具体位置说明。核实后，我们将在合理期限内删除或修改相关内容。
-
-**9. 非法律意见**
-以上声明仅为项目作者的善意说明，不构成法律意见。使用者如对自身使用行为的合规性存在疑问，应咨询专业法律人士。
-
----
-
-## 许可
-
-见 [LICENSE](LICENSE)。
-
-
-## 作者吐槽
-全文只有这句话是人类写的，deepseek太神奇了
+如果你是第一次使用，建议先安装一个原版版本，再安装 Java 和对应加载器。
